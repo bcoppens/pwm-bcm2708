@@ -36,7 +36,8 @@ struct bcm2708_pwm {
 };
 
 /* TODO */
-struct bcm2708_pwm* global;
+struct bcm2708_pwm global_;
+struct bcm2708_pwm* global = NULL;
 
 /* PWM Clocks.
  * https://github.com/hermanhermitage/videocoreiv/wiki/Register-Documentation */
@@ -70,15 +71,21 @@ static void pwm_clock_set_div(struct bcm2708_pwm* pwm, uint32_t target_frequency
   wait_for_clock_ready(pwm);
   writel(div, pwm->clock.div);
   
+  printk(KERN_ALERT "Set the divider...\n");
+  
   /* The clock source has to be set separately from enabling the clock,
    * so we do that here, where it conceptually belongs */
   wait_for_clock_ready(pwm);
   writel(CM_PASSWD | CM_CTL_CLOCK_OSC, pwm->clock.ctl);
+  
+  printk(KERN_ALERT "Set the oscillator...\n");
 }
 
 static void pwm_clock_enable(struct bcm2708_pwm* pwm) {
   wait_for_clock_ready(pwm);
   writel(CM_PASSWD | CM_CTL_ENAB, pwm->clock.ctl);
+  
+  printk(KERN_ALERT "Enabled clock...\n");
 }
 
 static void pwm_clock_disable(struct bcm2708_pwm* pwm) {
@@ -167,6 +174,8 @@ static int setup_device(struct bcm2708_pwm* pwm) {
     goto out_free;
 
   err = bcm2708_set_function(gc, gpio, ALT_FUN);
+  if (err)
+    goto out_free;
 
   pwm->gpio = gpio;
   pwm->base = __io_address(PWM_BASE); /* TODO: use the device struct */
@@ -187,15 +196,22 @@ static int setup_device(struct bcm2708_pwm* pwm) {
   );
   /* TODO: verify status? */
 
+  printk(KERN_ALERT "Configuring clock...\n");
   pwm_clock_set_div(pwm, CLOCK_FREQ);
   pwm_clock_enable(pwm);
+  printk(KERN_ALERT "Configured clock!\n");
+  
+  wait_for_clock_ready(pwm);
 
   /* Light purple, rather than a bright primary color: less chance of
    * it showing up on the display by accident rather than on purpose */
   color.red = 125; color.green =  0; color.blue = 125;
+  printk(KERN_ALERT "Outputting single color\n");
   output_single_color(pwm, color);
   
+  printk(KERN_ALERT "Disabling clock again\n");
   pwm_clock_disable(pwm);
+  printk(KERN_ALERT "Disabled clock\n");
 
 out:
   return err;
@@ -205,9 +221,13 @@ out_free:
 }
 
 static int release_device(struct bcm2708_pwm* pwm) {
+  printk(KERN_ALERT "Releasing device...\n");
+
   set_pwm_ctl(pwm, 0);
 
   gpio_free(pwm->gpio);
+  
+  printk(KERN_ALERT "Released device...\n");
   
   return 0;
 }
@@ -232,13 +252,29 @@ static struct platform_device *bcm2708_pwm_device;
 
 static int bcm2708_pwm_probe(struct platform_device *pdev)
 {
+  int ret = 0;
+
   printk(KERN_ALERT "pwm_probe\n");
-  return 0;
+  
+  global = &global_;
+  ret = setup_device(global);
+  if (ret) {
+    printk(KERN_ALERT "setup device failed!\n");
+    global = NULL;
+  }
+  
+  return ret;
 }
 
 static int bcm2708_pwm_remove(struct platform_device *pdev)
 {
   printk(KERN_ALERT "pwm_remove\n");
+  
+  if (global)
+    release_device(global);
+  
+  printk(KERN_ALERT "done\n");
+  
   return 0;
 }
 
@@ -290,8 +326,6 @@ static __init int pwm_bcm2708_init(void)
   if (!ret)
     goto out; /* TODO: unregister device */
   
-  ret = setup_device(global);
-  
 out:
   return ret;
 }
@@ -300,8 +334,9 @@ static __exit void pwm_bcm2708_exit(void)
 {
   printk(KERN_ALERT "Goodbye\n");
   platform_driver_unregister(&bcm2708_pwm_driver);
+  printk(KERN_ALERT "Driver unregistered\n");
   platform_device_unregister(bcm2708_pwm_device);
-  release_device(global);
+  printk(KERN_ALERT "Device unregistered\n");
 }
 
 module_init(pwm_bcm2708_init);
