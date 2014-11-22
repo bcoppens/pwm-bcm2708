@@ -95,12 +95,6 @@ static void pwm_clock_disable(struct bcm2708_pwm* pwm) {
 #define CTL_USEFIFO1        (1<<5) /* Channel 1 use fifo */
 #define CTL_PWENABLE1       (1<<0) /* Channel 1 enabled */
 
-/* Test data: Green: 255, Red: 0, Blue: 0 */
-/* 1 = 110 ; 0 = 100 ; default value (reset code): 0 */
-/* => 110 110 110 110 110 110 110 110   100 100 100 100 100 100 100 100   100 100 100 100 100 100 100 100 */
-/* = 11011011011011011011011010010010 01001001001001001001001001001001 00100100000000000000000000000000 */
-/* = 0xDB6DB692 0x49249249 0x24000000 */
-
 /* TODO: check status! */
 
 static void __iomem* pwm_fifo(struct bcm2708_pwm* pwm) {
@@ -117,10 +111,48 @@ static void write_data(struct bcm2708_pwm* pwm, uint32_t data) {
   writel(data, pwm_fifo(pwm));
 }
 
+/* Test code */
+
+/* Serialize single color, as GREEN RED BLUE */
+struct ws2812_color {
+  uint8_t red;
+  uint8_t green;
+  uint8_t blue;
+};
+
+#define OUTPUT_COLOR_LOOP(value) \
+    for (i = 7; i >= 0; i--) { \
+      current_data |= (( (value) >> i) & 1) << bit_shift; \
+      bit_shift--; \
+      \
+      if (bit_shift < 0) { /* flush word */ \
+        write_data(pwm, current_data); \
+        bit_shift = 31; \
+        current_data = 0; \
+      } \
+    }
+
+static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color color) {
+  int bit_shift = 31;
+  uint32_t current_data = 0;
+  int i;
+  
+  OUTPUT_COLOR_LOOP(color.green)
+  OUTPUT_COLOR_LOOP(color.red)
+  OUTPUT_COLOR_LOOP(color.blue)
+  
+  /* Flush remaining */
+  write_data(pwm, current_data);
+  
+  /* Silence bit is 0 -> reset command for the WS2812 */
+
+}
+
 static int setup_device(struct bcm2708_pwm* pwm) {
   int err = 0;
   int gpio = GPIO_PIN;
   struct gpio_chip *gc;
+  struct ws2812_color color;
   
   err = gpio_request(gpio, "pwm");
   if (err) {
@@ -158,10 +190,10 @@ static int setup_device(struct bcm2708_pwm* pwm) {
   pwm_clock_set_div(pwm, CLOCK_FREQ);
   pwm_clock_enable(pwm);
 
-  write_data(pwm, 0xDB6DB692);
-  write_data(pwm, 0x49249249);
-  write_data(pwm, 0x24000000);
-  /* Silence bit is 0 -> reset command for the WS2812 */
+  /* Light purple, rather than a bright primary color: less chance of
+   * it showing up on the display by accident rather than on purpose */
+  color.red = 125; color.green =  0; color.blue = 125;
+  output_single_color(pwm, color);
   
   pwm_clock_disable(pwm);
 
