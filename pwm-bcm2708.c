@@ -58,25 +58,18 @@ struct bcm2708_pwm* global = NULL;
 /* Source: https://raspberrypi.stackexchange.com/questions/1153/what-are-the-different-clock-sources-for-the-general-purpose-clocks */
 #define OSCILLATOR_FREQUENCY 19200000
 
-/* Busy wait, urgh! */
-static void wait_for_clock_ready(struct bcm2708_pwm* pwm) {
-  while (readl(pwm->clock.ctl) & CM_CTL_BUSY)
-    ;
-}
-
+/* TODO: fail when trying to set the clock when (readl(pwm->clock.ctl) & CM_CTL_BUSY) ! */
 static void pwm_clock_set_div(struct bcm2708_pwm* pwm, uint32_t target_frequency) {
   /* Use integer divider on the 19.2MHz oscillator, no MASH */
   uint32_t divider = OSCILLATOR_FREQUENCY / target_frequency;
   uint32_t div     = CM_PASSWD | (divider << 12);
 
-  wait_for_clock_ready(pwm);
   writel(div, pwm->clock.div);
   
   printk(KERN_ALERT "Set the divider to %x...\n", divider);
 }
 
 static void pwm_clock_enable(struct bcm2708_pwm* pwm) {
-  wait_for_clock_ready(pwm);
   writel(CM_PASSWD | CM_CTL_CLOCK_OSC, pwm->clock.ctl);
   printk(KERN_ALERT "Set the oscillator...\n");
 
@@ -85,7 +78,6 @@ static void pwm_clock_enable(struct bcm2708_pwm* pwm) {
 }
 
 static void pwm_clock_disable(struct bcm2708_pwm* pwm) {
-  wait_for_clock_ready(pwm);
   writel(CM_PASSWD, pwm->clock.ctl);
 }
 
@@ -215,30 +207,32 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   pwm->clock.div = pwm->clock.ctl + CM_PWM_DIV_OFFSET;
   
   printk(KERN_ALERT "pwm->base = %p (PWM_BASE %p)\n", pwm->base, (void*)PWM_BASE);
+  printk(KERN_ALERT "pwmclock = %p (PWM_BASE %p)\n", pwm->clock.ctl, (void*)CM_PWM_CTL);
   
-  /* Clear fifo */
-  set_pwm_ctl(pwm, CTL_CLRFIFO);
-
-  /* TODO: no DMA yet */
-  set_pwm_ctl(pwm,   CTL_MODE1_SERIALIZE
-                   | CTL_USEFIFO1
-                   | CTL_PWENABLE1
-  );
-  /* TODO: verify status? */
-
   printk(KERN_ALERT "Configuring clock...\n");
   pwm_clock_set_div(pwm, CLOCK_FREQ);
   pwm_clock_enable(pwm);
   printk(KERN_ALERT "Configured clock!\n");
   
-  wait_for_clock_ready(pwm);
+  /* Clear PWM STA bus error bit */
+  writel(0x100, pwm->base + 0x4);
+
+  /* Clear fifo */
+  set_pwm_ctl(pwm, CTL_CLRFIFO);
+  writel(32, pwm->base + 0x10);
+
+  /* TODO: no DMA yet */
+  set_pwm_ctl(pwm,   CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
+  /* TODO: verify status? */
 
   /* Light purple, rather than a bright primary color: less chance of
    * it showing up on the display by accident rather than on purpose */
   color.red = 125; color.green =  0; color.blue = 125;
   printk(KERN_ALERT "Outputting single color\n");
+
   output_single_color(pwm, color);
-  
+  udelay(60);
+
   printk(KERN_ALERT "Disabling clock again\n");
   pwm_clock_disable(pwm);
   printk(KERN_ALERT "Disabled clock\n");
