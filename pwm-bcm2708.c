@@ -41,14 +41,14 @@ struct bcm2708_pwm* global = NULL;
 
 /* PWM Clocks.
  * https://github.com/hermanhermitage/videocoreiv/wiki/Register-Documentation */
-#define CM_PWM_CTL       (BCM2708_PERI_BASE + 0x1010a0)
-#define CM_PWM_DIV       (BCM2708_PERI_BASE + 0x1010a4)
+#define CM_PWM_CTL        (BCM2708_PERI_BASE + 0x1010a0)
+#define CM_PWM_DIV_OFFSET 0x4
 
-#define CM_PASSWD        (0x5a << 24)
+#define CM_PASSWD         (0x5a << 24)
 
-#define CM_CTL_BUSY      (1 << 7)
-#define CM_CTL_ENAB      (1 << 4)
-#define CM_CTL_CLOCK_OSC 0x1
+#define CM_CTL_BUSY       (1 << 7)
+#define CM_CTL_ENAB       (1 << 4)
+#define CM_CTL_CLOCK_OSC  0x1
 
 /* The WS2812 data transfer time is ~1.25µs +/- 600ns (one bit transfer), i.e., 800kHz 
  * One WS2812 bit equals 3 PWM-sent bits, thus, we need to clock at 2.4MHz */
@@ -155,15 +155,32 @@ static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color col
 
 }
 
-static int setup_device(struct bcm2708_pwm* pwm) {
+static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   int err = 0;
   int gpio = GPIO_PIN;
   struct gpio_chip *gc;
   struct ws2812_color color;
   
+  struct resource *regs_pwm;
+  struct resource *regs_cm_pwm;
+
+  regs_pwm = platform_get_resource_byname(pdev, IORESOURCE_MEM, "io-memory-pwm");
+  if (!regs_pwm) {
+    printk(KERN_ALERT "Failed to acquire IO resources for PWM\n");
+    err = -ENOMEM;
+    goto out;
+  }
+
+  regs_cm_pwm = platform_get_resource_byname(pdev, IORESOURCE_MEM, "io-memory-cm-pwm");
+  if (!regs_cm_pwm) {
+    printk(KERN_ALERT "Failed to acquire IO resources for CM_PWM\n");
+    err = -ENOMEM;
+    goto out;
+  }
+
   err = gpio_request(gpio, "pwm");
   if (err) {
-    printk(KERN_ALERT "Failed to acquire gpio pin");
+    printk(KERN_ALERT "Failed to acquire gpio pin\n");
     goto out;
   }
   
@@ -171,24 +188,36 @@ static int setup_device(struct bcm2708_pwm* pwm) {
   gc = gpio_to_chip(gpio);
   err = gpio_direction_input(gpio);
   if (err)
-    goto out_free;
-
+    goto out_free_gpio;
+  
   err = bcm2708_set_function(gc, gpio, ALT_FUN);
   if (err)
-    goto out_free;
-
+    goto out_free_gpio;
+  
   pwm->gpio = gpio;
-  pwm->base = __io_address(PWM_BASE); /* TODO: use the device struct */
   pwm->channel = PWM_CHANNEL;
   
-  pwm->clock.ctl = __io_address(CM_PWM_CTL);
-  pwm->clock.div = __io_address(CM_PWM_DIV);
+  pwm->base = ioremap(regs_pwm->start, resource_size(regs_pwm));
+  if (!pwm->base) {
+    printk(KERN_ALERT "Failed to remap IO resources for PWM\n"); 
+    err = -ENOMEM;
+    goto out_free_gpio;
+  }
   
+  pwm->clock.ctl = ioremap(regs_cm_pwm->start, resource_size(regs_cm_pwm));
+  if (!pwm->base) {
+    printk(KERN_ALERT "Failed to remap IO resources for CM PWM\n");
+    err = -ENOMEM;
+    goto out_free_iomem_pwm;
+  }
   
+  pwm->clock.div = pwm->clock.ctl + CM_PWM_DIV_OFFSET;
+  
+  printk(KERN_ALERT "pwm->base = %p (PWM_BASE %p)\n", pwm->base, (void*)PWM_BASE);
   
   /* Clear fifo */
   set_pwm_ctl(pwm, CTL_CLRFIFO);
-  
+
   /* TODO: no DMA yet */
   set_pwm_ctl(pwm,   CTL_MODE1_SERIALIZE
                    | CTL_USEFIFO1
@@ -215,8 +244,16 @@ static int setup_device(struct bcm2708_pwm* pwm) {
 
 out:
   return err;
-out_free:
+
+out_free_iomem_cm_pwm:
+  iounmap(pwm->clock.ctl);
+
+out_free_iomem_pwm:
+  iounmap(pwm->base);
+
+out_free_gpio:
   gpio_free(gpio);
+
   return err;
 }
 
@@ -225,6 +262,7 @@ static int release_device(struct bcm2708_pwm* pwm) {
 
   set_pwm_ctl(pwm, 0);
 
+  iounmap(pwm->base);
   gpio_free(pwm->gpio);
   
   printk(KERN_ALERT "Released device...\n");
@@ -242,7 +280,13 @@ static struct resource bcm2708_pwm_resources[] = {
     .start	= PWM_BASE,
     .end	= PWM_BASE + 0x32,
     .flags	= IORESOURCE_MEM,
-    .name	= "io-memory"
+    .name	= "io-memory-pwm"
+  },
+  {
+    .start	= CM_PWM_CTL,
+    .end	= CM_PWM_CTL + 0x8,
+    .flags	= IORESOURCE_MEM,
+    .name	= "io-memory-cm-pwm"
   }
 };
 
@@ -257,7 +301,8 @@ static int bcm2708_pwm_probe(struct platform_device *pdev)
   printk(KERN_ALERT "pwm_probe\n");
   
   global = &global_;
-  ret = setup_device(global);
+
+  ret = setup_device(pdev, global);
   if (ret) {
     printk(KERN_ALERT "setup device failed!\n");
     global = NULL;
