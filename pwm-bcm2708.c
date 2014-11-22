@@ -68,24 +68,19 @@ static void pwm_clock_set_div(struct bcm2708_pwm* pwm, uint32_t target_frequency
   /* Use integer divider on the 19.2MHz oscillator, no MASH */
   uint32_t divider = OSCILLATOR_FREQUENCY / target_frequency;
   uint32_t div     = CM_PASSWD | (divider << 12);
-  
+
   wait_for_clock_ready(pwm);
   writel(div, pwm->clock.div);
   
   printk(KERN_ALERT "Set the divider to %x...\n", divider);
-  
-  /* The clock source has to be set separately from enabling the clock,
-   * so we do that here, where it conceptually belongs */
-  wait_for_clock_ready(pwm);
-  writel(CM_PASSWD | CM_CTL_CLOCK_OSC, pwm->clock.ctl);
-  
-  printk(KERN_ALERT "Set the oscillator...\n");
 }
 
 static void pwm_clock_enable(struct bcm2708_pwm* pwm) {
   wait_for_clock_ready(pwm);
-  writel(CM_PASSWD | CM_CTL_ENAB, pwm->clock.ctl);
-  
+  writel(CM_PASSWD | CM_CTL_CLOCK_OSC, pwm->clock.ctl);
+  printk(KERN_ALERT "Set the oscillator...\n");
+
+  writel(CM_PASSWD | CM_CTL_CLOCK_OSC | CM_CTL_ENAB, pwm->clock.ctl);
   printk(KERN_ALERT "Enabled clock...\n");
 }
 
