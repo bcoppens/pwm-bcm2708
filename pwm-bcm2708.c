@@ -7,6 +7,8 @@
 #include <mach/platform.h>
 #include <mach/gpio.h>
 
+#include <linux/platform_data/bcm2708.h>
+
 #include <asm-generic/gpio.h>
 
 
@@ -19,15 +21,70 @@
 #define ALT_FUN GPIO_FSEL_ALT5
 #define PWM_CHANNEL 0
 
+struct clock {
+  void __iomem *ctl;
+  void __iomem *div;
+};
+
 struct bcm2708_pwm {
   void __iomem *base;
   int channel;
   
   int gpio;
+  
+  struct clock clock; /* PWM-clock, so it's OK we manage this ourselves */
 };
 
 /* TODO */
 struct bcm2708_pwm* global;
+
+/* PWM Clocks.
+ * https://github.com/hermanhermitage/videocoreiv/wiki/Register-Documentation */
+#define CM_PWM_CTL       (BCM2708_PERI_BASE + 0x1010a0)
+#define CM_PWM_DIV       (BCM2708_PERI_BASE + 0x1010a4)
+
+#define CM_PASSWD        (0x5a << 24)
+
+#define CM_CTL_BUSY      (1 << 7)
+#define CM_CTL_ENAB      (1 << 4)
+#define CM_CTL_CLOCK_OSC 0x1
+
+/* The WS2812 data transfer time is ~1.25µs +/- 600ns (one bit transfer), i.e., 800kHz 
+ * One WS2812 bit equals 3 PWM-sent bits, thus, we need to clock at 2.4MHz */
+#define CLOCK_FREQ (3*800000)
+
+/* Source: https://raspberrypi.stackexchange.com/questions/1153/what-are-the-different-clock-sources-for-the-general-purpose-clocks */
+#define OSCILLATOR_FREQUENCY 19200000
+
+/* Busy wait, urgh! */
+static void wait_for_clock_ready(struct bcm2708_pwm* pwm) {
+  while (readl(pwm->clock.ctl) & CM_CTL_BUSY)
+    ;
+}
+
+static void pwm_clock_set_div(struct bcm2708_pwm* pwm, uint32_t target_frequency) {
+  /* Use integer divider on the 19.2MHz oscillator, no MASH */
+  uint32_t divider = OSCILLATOR_FREQUENCY / target_frequency;
+  uint32_t div     = CM_PASSWD | (divider << 12);
+  
+  wait_for_clock_ready(pwm);
+  writel(div, pwm->clock.div);
+  
+  /* The clock source has to be set separately from enabling the clock,
+   * so we do that here, where it conceptually belongs */
+  wait_for_clock_ready(pwm);
+  writel(CM_PASSWD | CM_CTL_CLOCK_OSC, pwm->clock.ctl);
+}
+
+static void pwm_clock_enable(struct bcm2708_pwm* pwm) {
+  wait_for_clock_ready(pwm);
+  writel(CM_PASSWD | CM_CTL_ENAB, pwm->clock.ctl);
+}
+
+static void pwm_clock_disable(struct bcm2708_pwm* pwm) {
+  wait_for_clock_ready(pwm);
+  writel(CM_PASSWD, pwm->clock.ctl);
+}
 
 /* PWM Control register flags.
  * pp 142-143 of the BCM2835 peripheral docs */
@@ -45,13 +102,6 @@ struct bcm2708_pwm* global;
 /* = 0xDB6DB692 0x49249249 0x24000000 */
 
 /* TODO: check status! */
-
-static void __iomem* pwm_data_address(struct bcm2708_pwm* pwm, int channel) {
-  if (channel == 0) {
-    return pwm->base + 0x14;
-  }
-  return pwm->base + 24;
-}
 
 static void __iomem* pwm_fifo(struct bcm2708_pwm* pwm) {
   return pwm->base + 0x18;
@@ -80,11 +130,20 @@ static int setup_device(struct bcm2708_pwm* pwm) {
   
   
   gc = gpio_to_chip(gpio);
-  err = bcm2708_set_gpio_function(gc, gpio, ALT_FUN);
+  err = gpio_direction_input(gpio);
+  if (err)
+    goto out_free;
+
+  err = bcm2708_set_function(gc, gpio, ALT_FUN);
 
   pwm->gpio = gpio;
   pwm->base = __io_address(PWM_BASE); /* TODO: use the device struct */
   pwm->channel = PWM_CHANNEL;
+  
+  pwm->clock.ctl = __io_address(CM_PWM_CTL);
+  pwm->clock.div = __io_address(CM_PWM_DIV);
+  
+  
   
   /* Clear fifo */
   set_pwm_ctl(pwm, CTL_CLRFIFO);
@@ -96,11 +155,20 @@ static int setup_device(struct bcm2708_pwm* pwm) {
   );
   /* TODO: verify status? */
 
+  pwm_clock_set_div(pwm, CLOCK_FREQ);
+  pwm_clock_enable(pwm);
+
   write_data(pwm, 0xDB6DB692);
   write_data(pwm, 0x49249249);
   write_data(pwm, 0x24000000);
+  /* Silence bit is 0 -> reset command for the WS2812 */
+  
+  pwm_clock_disable(pwm);
 
 out:
+  return err;
+out_free:
+  gpio_free(gpio);
   return err;
 }
 
