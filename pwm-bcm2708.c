@@ -4,14 +4,16 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/platform_data/bcm2708.h>
+#include <linux/mutex.h>
+#include <linux/stat.h>
+#include <linux/string.h>
 
 #include <mach/platform.h>
 #include <mach/gpio.h>
 
-#include <linux/platform_data/bcm2708.h>
 
 #include <asm-generic/gpio.h>
-
 
 #define DRV_NAME	"bcm2708_pwm"
 
@@ -22,18 +24,32 @@
 #define ALT_FUN GPIO_FSEL_ALT5
 #define PWM_CHANNEL 0
 
+/* TODO: check whether or not we can/should use clk_get(&pdev->dev, clock_name) */
 struct clock {
   void __iomem *ctl;
   void __iomem *div;
 };
 
+/* Serialize single color, as GREEN RED BLUE */
+struct ws2812_color {
+  uint8_t red;
+  uint8_t green;
+  uint8_t blue;
+};
+
+
 struct bcm2708_pwm {
+  struct mutex mutex;
+  
   void __iomem *base;
   int channel;
   
   int gpio;
   
   struct clock clock; /* PWM-clock, so it's OK we manage this ourselves */
+  
+  /* To test */
+  struct ws2812_color color;
 };
 
 /* TODO */
@@ -108,13 +124,6 @@ static void write_data(struct bcm2708_pwm* pwm, uint32_t data) {
 
 /* Test code */
 
-/* Serialize single color, as GREEN RED BLUE */
-struct ws2812_color {
-  uint8_t red;
-  uint8_t green;
-  uint8_t blue;
-};
-
 /* To send '1', send 110; to send '0', send '100' */
 #define OUTPUT_BIT(bit) \
   current_data |= (bit) << bit_shift; \
@@ -148,6 +157,38 @@ static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color col
 
 }
 
+/* sysfs code */
+ssize_t pwm_show_led0_color(struct device *dev, struct device_attribute *attr, char *buf) {
+  /* TODO: container_of to get the pdev, it's associated data, and through it, the pwm */
+  struct ws2812_color color;
+
+  if (!global) {
+    return snprintf(buf, PAGE_SIZE, "%s", "ERROR\n");
+  }
+  
+  mutex_lock(&global->mutex); /* TODO: interruptible? */
+  color = global->color;
+  mutex_unlock(&global->mutex);
+
+  return snprintf(buf, PAGE_SIZE, "%i %i %i\n", color.red, color.green, color.blue);
+}
+
+static DEVICE_ATTR(pwm_led0_color, S_IRUGO | S_IWUSR, pwm_show_led0_color, NULL);
+
+static struct attribute *pwm_dev_attrs[] = {
+  &dev_attr_pwm_led0_color.attr,
+  NULL,
+};
+
+static struct attribute_group pwm_dev_attr_group = {
+  .attrs = pwm_dev_attrs,
+};
+
+static const struct attribute_group *pwm_dev_attr_groups[] = {
+  &pwm_dev_attr_group,
+  NULL,
+};
+
 static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   int err = 0;
   int gpio = GPIO_PIN;
@@ -156,6 +197,11 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   
   struct resource *regs_pwm;
   struct resource *regs_cm_pwm;
+  
+  mutex_init(&pwm->mutex);
+  
+  color.red = 125; color.green =  0; color.blue = 125;
+  pwm->color = color;
 
   regs_pwm = platform_get_resource_byname(pdev, IORESOURCE_MEM, "io-memory-pwm");
   if (!regs_pwm) {
@@ -227,10 +273,10 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
 
   /* Light purple, rather than a bright primary color: less chance of
    * it showing up on the display by accident rather than on purpose */
-  color.red = 125; color.green =  0; color.blue = 125;
+  
   printk(KERN_ALERT "Outputting single color\n");
 
-  output_single_color(pwm, color);
+  output_single_color(pwm, pwm->color);
   udelay(60);
 
   printk(KERN_ALERT "Disabling clock again\n");
@@ -328,6 +374,7 @@ static struct platform_driver bcm2708_pwm_driver = {
   .driver  = {
     .name    = DRV_NAME,
     .owner   = THIS_MODULE,
+    .groups  = pwm_dev_attr_groups,
   },
   .probe  = bcm2708_pwm_probe,
   .remove = bcm2708_pwm_remove,
