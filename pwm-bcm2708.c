@@ -1,3 +1,4 @@
+#include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -71,7 +72,7 @@ static void pwm_clock_set_div(struct bcm2708_pwm* pwm, uint32_t target_frequency
   wait_for_clock_ready(pwm);
   writel(div, pwm->clock.div);
   
-  printk(KERN_ALERT "Set the divider...\n");
+  printk(KERN_ALERT "Set the divider to %x...\n", divider);
   
   /* The clock source has to be set separately from enabling the clock,
    * so we do that here, where it conceptually belongs */
@@ -127,16 +128,21 @@ struct ws2812_color {
   uint8_t blue;
 };
 
+/* To send '1', send 110; to send '0', send '100' */
+#define OUTPUT_BIT(bit) \
+  current_data |= (bit) << bit_shift; \
+  bit_shift--; \
+  if (bit_shift < 0) { /* flush word */ \
+    write_data(pwm, current_data); \
+    bit_shift = 31; \
+    current_data = 0; \
+  }
+
 #define OUTPUT_COLOR_LOOP(value) \
     for (i = 7; i >= 0; i--) { \
-      current_data |= (( (value) >> i) & 1) << bit_shift; \
-      bit_shift--; \
-      \
-      if (bit_shift < 0) { /* flush word */ \
-        write_data(pwm, current_data); \
-        bit_shift = 31; \
-        current_data = 0; \
-      } \
+      OUTPUT_BIT(1); \
+      OUTPUT_BIT( ((value) >> i) & 1 ); \
+      OUTPUT_BIT(0); \
     }
 
 static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color color) {
