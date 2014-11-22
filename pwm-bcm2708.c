@@ -2,6 +2,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/bcm2708.h>
@@ -154,8 +155,10 @@ static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color col
   write_data(pwm, current_data);
   
   /* Silence bit is 0 -> reset command for the WS2812 */
-
 }
+
+#undef OUTPUT_COLOR_LOOP
+#undef OUTPUT_BIT
 
 /* sysfs code */
 ssize_t pwm_show_led0_color(struct device *dev, struct device_attribute *attr, char *buf) {
@@ -173,7 +176,73 @@ ssize_t pwm_show_led0_color(struct device *dev, struct device_attribute *attr, c
   return snprintf(buf, PAGE_SIZE, "%i %i %i\n", color.red, color.green, color.blue);
 }
 
-static DEVICE_ATTR(pwm_led0_color, S_IRUGO | S_IWUSR, pwm_show_led0_color, NULL);
+static void output_color(struct bcm2708_pwm* pwm);
+
+/* TODO: check that pos < count! */
+ssize_t pwm_store_led0_color(struct device *dev, struct device_attribute *attr,
+  const char *buf, size_t count) {
+  struct ws2812_color color;
+  const char* current_pos = NULL;
+  
+  if (!global) {
+    printk(KERN_ALERT "Trying to set led color, but no PWM device!\n");
+    return -ENOMEM;
+  }
+  
+  if (!buf) {
+    printk(KERN_ALERT "NULL buffer in store!");
+    return -ENOMEM;
+  }
+    
+  printk(KERN_ALERT "LED string: %i %p %s!\n", count, buf, buf);
+  mutex_lock(&global->mutex);
+  count = -ENOMEM;
+    goto out;
+  
+  if (!kstrtou8(current_pos, 0 /* auto-detect base */, &color.red)) {
+    printk(KERN_ALERT "Error parsing the LED color red!\n");
+    count = -ENOMEM;
+    goto out;
+  }
+
+  current_pos = strstr(current_pos, " ");
+  if (!current_pos) {
+    printk(KERN_ALERT "Did not find a space after red!\n");
+    count = -ENOMEM;
+    goto out;
+  }
+  current_pos++;
+  
+  if (!kstrtou8(current_pos, 0 /* auto-detect base */, &color.green)) {
+    printk(KERN_ALERT "Error parsing the LED color green!\n");
+    count = -ENOMEM;
+    goto out;
+  }
+
+  current_pos = strstr(current_pos, " ");
+  if (!current_pos) {
+    printk(KERN_ALERT "Did not find a space after green!\n");
+    count = -ENOMEM;
+    goto out;
+  }
+  current_pos++;
+  
+  if (!kstrtou8(current_pos, 0 /* auto-detect base */, &color.blue)) {
+    printk(KERN_ALERT "Error parsing the LED color red!\n");
+    count = -ENOMEM;
+    goto out;
+  }
+  
+  printk(KERN_ALERT "Setting LED color to %i %i %i\n", color.red, color.green, color.blue);
+  global->color = color;
+  //output_color(global);
+
+out:
+  mutex_unlock(&global->mutex);
+  return count;
+}
+
+static DEVICE_ATTR(pwm_led0_color, S_IRUGO | S_IWUSR, pwm_show_led0_color, pwm_store_led0_color);
 
 static struct attribute *pwm_dev_attrs[] = {
   &dev_attr_pwm_led0_color.attr,
@@ -189,6 +258,31 @@ static const struct attribute_group *pwm_dev_attr_groups[] = {
   NULL,
 };
 
+static void output_color(struct bcm2708_pwm* pwm) {
+  pwm_clock_enable(pwm);
+  printk(KERN_ALERT "Configured clock!\n");
+  
+  /* Clear PWM STA bus error bit */
+  writel(0x100, pwm->base + 0x4);
+
+  /* Clear fifo */
+  set_pwm_ctl(pwm, CTL_CLRFIFO);
+  writel(32, pwm->base + 0x10);
+
+  /* TODO: no DMA yet */
+  set_pwm_ctl(pwm,   CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
+  /* TODO: verify status? */
+  
+  printk(KERN_ALERT "Outputting single color\n");
+
+  output_single_color(pwm, pwm->color);
+  udelay(60);
+
+  printk(KERN_ALERT "Disabling clock again\n");
+  pwm_clock_disable(pwm);
+  printk(KERN_ALERT "Disabled clock\n");
+}
+
 static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   int err = 0;
   int gpio = GPIO_PIN;
@@ -200,6 +294,8 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   
   mutex_init(&pwm->mutex);
   
+  /* Light purple, rather than a bright primary color: less chance of
+   * it showing up on the display by accident rather than on purpose */
   color.red = 125; color.green =  0; color.blue = 125;
   pwm->color = color;
 
@@ -257,31 +353,9 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   
   printk(KERN_ALERT "Configuring clock...\n");
   pwm_clock_set_div(pwm, CLOCK_FREQ);
-  pwm_clock_enable(pwm);
-  printk(KERN_ALERT "Configured clock!\n");
   
-  /* Clear PWM STA bus error bit */
-  writel(0x100, pwm->base + 0x4);
-
-  /* Clear fifo */
-  set_pwm_ctl(pwm, CTL_CLRFIFO);
-  writel(32, pwm->base + 0x10);
-
-  /* TODO: no DMA yet */
-  set_pwm_ctl(pwm,   CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
-  /* TODO: verify status? */
-
-  /* Light purple, rather than a bright primary color: less chance of
-   * it showing up on the display by accident rather than on purpose */
-  
-  printk(KERN_ALERT "Outputting single color\n");
-
-  output_single_color(pwm, pwm->color);
-  udelay(60);
-
-  printk(KERN_ALERT "Disabling clock again\n");
-  pwm_clock_disable(pwm);
-  printk(KERN_ALERT "Disabled clock\n");
+  /* Output initial color */
+  output_color(pwm);
 
 out:
   return err;
