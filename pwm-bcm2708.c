@@ -192,7 +192,7 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   
   
   gc = gpio_to_chip(gpio);
-  err = gpio_direction_input(gpio);
+  err = gpio_direction_output(gpio, 0);
   if (err)
     goto out_free_gpio;
   
