@@ -206,7 +206,7 @@ ssize_t pwm_store_led0_color(struct device_driver *driver,
   
   printk(KERN_ALERT "Setting LED color to %i %i %i\n", color.red, color.green, color.blue);
   global->color = color;
-  //output_color(global);
+  output_color(global);
 
 out:
   mutex_unlock(&global->mutex);
@@ -238,7 +238,7 @@ static void output_color(struct bcm2708_pwm* pwm) {
   set_pwm_ctl(pwm, CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
   /* TODO: verify status? */
   
-  printk(KERN_ALERT "Outputting single color\n");
+  printk(KERN_ALERT "Outputting single color %hhu %hhu %hhu\n", pwm->color.red, pwm->color.green, pwm->color.blue);
 
   output_single_color(pwm, pwm->color);
   
