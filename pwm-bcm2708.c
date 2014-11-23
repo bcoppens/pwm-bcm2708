@@ -161,7 +161,7 @@ static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color col
 #undef OUTPUT_BIT
 
 /* sysfs code */
-ssize_t pwm_show_led0_color(struct device *dev, struct device_attribute *attr, char *buf) {
+ssize_t pwm_show_led0_color(struct device_driver *driver, char *buf) {
   /* TODO: container_of to get the pdev, it's associated data, and through it, the pwm */
   struct ws2812_color color;
 
@@ -179,11 +179,11 @@ ssize_t pwm_show_led0_color(struct device *dev, struct device_attribute *attr, c
 static void output_color(struct bcm2708_pwm* pwm);
 
 /* TODO: check that pos < count! */
-ssize_t pwm_store_led0_color(struct device *dev, struct device_attribute *attr,
-  const char *buf, size_t count) {
+ssize_t pwm_store_led0_color(struct device_driver *driver,
+    const char *buf, size_t count) {
   struct ws2812_color color;
   const char* current_pos = NULL;
-  
+
   if (!global) {
     printk(KERN_ALERT "Trying to set led color, but no PWM device!\n");
     return -ENOMEM;
@@ -242,21 +242,15 @@ out:
   return count;
 }
 
-static DEVICE_ATTR(pwm_led0_color, S_IRUGO | S_IWUSR, pwm_show_led0_color, pwm_store_led0_color);
+static DRIVER_ATTR(pwm_led0_color, S_IRUGO | S_IWUSR, pwm_show_led0_color, pwm_store_led0_color);
 
 static struct attribute *pwm_dev_attrs[] = {
-  &dev_attr_pwm_led0_color.attr,
+  &driver_attr_pwm_led0_color.attr,
   NULL,
 };
 
-static struct attribute_group pwm_dev_attr_group = {
-  .attrs = pwm_dev_attrs,
-};
+ATTRIBUTE_GROUPS(pwm_dev);
 
-static const struct attribute_group *pwm_dev_attr_groups[] = {
-  &pwm_dev_attr_group,
-  NULL,
-};
 
 static void output_color(struct bcm2708_pwm* pwm) {
   pwm_clock_enable(pwm);
@@ -448,7 +442,7 @@ static struct platform_driver bcm2708_pwm_driver = {
   .driver  = {
     .name    = DRV_NAME,
     .owner   = THIS_MODULE,
-    .groups  = pwm_dev_attr_groups,
+    .groups  = pwm_dev_groups,
   },
   .probe  = bcm2708_pwm_probe,
   .remove = bcm2708_pwm_remove,
@@ -466,7 +460,7 @@ static __init int pwm_bcm2708_init(void)
     printk(KERN_ALERT "Unable to allocate platform device!\n");
     goto out;
   }
-  
+
   ret = platform_device_add_resources(
     bcm2708_pwm_device,
     bcm2708_pwm_resources,
@@ -493,6 +487,7 @@ out:
 
 static __exit void pwm_bcm2708_exit(void)
 {
+  /* TODO: don't unregister if not (succesfully) registered */
   printk(KERN_ALERT "Goodbye\n");
   platform_driver_unregister(&bcm2708_pwm_driver);
   printk(KERN_ALERT "Driver unregistered\n");
