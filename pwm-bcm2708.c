@@ -141,6 +141,10 @@ static void __iomem* pwm_fifo(struct bcm2708_pwm* pwm) {
   return pwm->base + 0x18;
 }
 
+static void __iomem* pwm_dmac(struct bcm2708_pwm* pwm) {
+  return pwm->base + 0x8;
+}
+
 static void set_pwm_ctl(struct bcm2708_pwm* pwm, int flags) {
   /* We need to write the reserved flags as 0, so this is ok */
   writel(flags, pwm->base);
@@ -149,6 +153,17 @@ static void set_pwm_ctl(struct bcm2708_pwm* pwm, int flags) {
 /* For now to test: no dma */
 static void write_data(struct bcm2708_pwm* pwm, uint32_t data) {
   writel(data, pwm_fifo(pwm));
+}
+
+#define PWM_DMAC_ENAB     (1<<31)
+#define PWM_DMAC_PANIC(n) (n<<8)
+#define PWM_DMAC_DREQ(n)  (n)
+static void pwm_enable_dma(struct bcm2708_pwm* pwm) {
+  writel(PWM_DMAC_ENAB | PWM_DMAC_PANIC(7) | PWM_DMAC_DREQ(3), pwm_dmac(pwm));
+}
+
+static void pwm_disable_dma(struct bcm2708_pwm* pwm) {
+  writel(PWM_DMAC_ENAB | PWM_DMAC_PANIC(7) | PWM_DMAC_DREQ(7), pwm_dmac(pwm));
 }
 
 /* Test code */
@@ -307,6 +322,9 @@ ATTRIBUTE_GROUPS(pwm_dev);
 
 
 static void output_color(struct bcm2708_pwm* pwm) {
+  /* TODO: we should automatically disable it after DMA is done, use IRQ? */
+  pwm_disable_dma(pwm);
+
   pwm_clock_enable(pwm);
   printk(KERN_ALERT "Configured clock!\n");
   
@@ -443,13 +461,19 @@ static void dma_output_color_list(struct bcm2708_pwm* pwm,
   cb->pad[0] = 0;
   cb->pad[1] = 0;
 
-  printk(KERN_ALERT "Starting dma transfer of lentgh %i\n", len);
+  printk(KERN_ALERT "Starting dma transfer of length %i\n", len);
 
   /* For now, since we use coherent memory, no need to flush CB */
 
   /* Abort if busy, TODO check return value */
   bcm_dma_abort(dma->base);
+
+  pwm_enable_dma(pwm);
+  set_pwm_ctl(pwm, CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
+
   bcm_dma_start(dma->base, cb_io);
+
+  /* TODO: I want to set CTL_PWENABLE1 to 0 again when we are done! */
 }
 
 
