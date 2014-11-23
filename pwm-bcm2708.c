@@ -50,6 +50,8 @@ struct ws2812_color {
 struct dma_info {
   int can_dma;
 
+  size_t start_offset; /* sizeof(struct bcm2708_dma_cb) */
+
   size_t allocated_size;
   size_t usable_size;
   size_t used_size;
@@ -152,20 +154,20 @@ static void write_data(struct bcm2708_pwm* pwm, uint32_t data) {
 /* Test code */
 
 /* To send '1', send 110; to send '0', send '100' */
-#define OUTPUT_BIT(bit) \
+#define OUTPUT_BIT(bit, write_command) \
   current_data |= (bit) << bit_shift; \
   bit_shift--; \
   if (bit_shift < 0) { /* flush word */ \
-    write_data(pwm, current_data); \
+    write_command ; \
     bit_shift = 31; \
     current_data = 0; \
   }
 
-#define OUTPUT_COLOR_LOOP(value) \
+#define OUTPUT_COLOR_LOOP(value, write_command) \
     for (i = 7; i >= 0; i--) { \
-      OUTPUT_BIT(1); \
-      OUTPUT_BIT( ((value) >> i) & 1 ); \
-      OUTPUT_BIT(0); \
+      OUTPUT_BIT(1, write_command); \
+      OUTPUT_BIT( ((value) >> i) & 1, write_command ); \
+      OUTPUT_BIT(0, write_command); \
     }
 
 static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color color) {
@@ -173,9 +175,9 @@ static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color col
   uint32_t current_data = 0;
   int i;
   
-  OUTPUT_COLOR_LOOP(color.green)
-  OUTPUT_COLOR_LOOP(color.red)
-  OUTPUT_COLOR_LOOP(color.blue)
+  OUTPUT_COLOR_LOOP(color.green, write_data(pwm, current_data))
+  OUTPUT_COLOR_LOOP(color.red,   write_data(pwm, current_data))
+  OUTPUT_COLOR_LOOP(color.blue,  write_data(pwm, current_data))
   
   /* Flush remaining */
   write_data(pwm, current_data);
@@ -185,8 +187,64 @@ static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color col
   udelay(100);
 }
 
+static size_t write_ws2812_list_to_buffer(struct ws2812_color* list,
+                                          size_t               nens,
+                                          uint32_t*            buffer,
+                                          size_t               buffer_size) {
+  int bit_shift = 31;
+  uint32_t current_data = 0;
+  int i;
+  size_t buf_pos = 0;
+  size_t list_pos = 0;
+
+#define TO_BUFFER \
+  do { \
+    buffer[buf_pos++] = current_data; \
+    if(buf_pos >= buffer_size) goto done; \
+  } while(0)
+
+  for (list_pos = 0; list_pos < nens; list_pos++) {
+    OUTPUT_COLOR_LOOP(list[list_pos].green, TO_BUFFER)
+    OUTPUT_COLOR_LOOP(list[list_pos].red,   TO_BUFFER)
+    OUTPUT_COLOR_LOOP(list[list_pos].blue,  TO_BUFFER)
+  }
+
+  /* Flush remaining */
+  TO_BUFFER;
+
+  /* Silence */
+  current_data = 0;
+  TO_BUFFER;
+
+done:
+  if (buf_pos >= buffer_size)
+    printk(KERN_ALERT "Buffer was full!\n");
+
+  return buf_pos; /* Number of elements to be transfered with DMA */
+}
+
+#undef TO_BUFFER
+
 #undef OUTPUT_COLOR_LOOP
 #undef OUTPUT_BIT
+
+static struct ws2812_color test_color_list[] = {
+  { 125,   0,   0},
+  {   0, 125,   0},
+  {   0,   0, 125},
+  { 125, 125,   0},
+  {   0, 125, 125},
+  { 125, 125, 125}
+};
+/* To quickly clear the LEDs */
+static struct ws2812_color test_color_list_[] = {
+  {   0,   0,   0},
+  {   0,   0,   0},
+  {   0,   0,   0},
+  {   0,   0,   0},
+  {   0,   0,   0},
+  {   0,   0,   0}
+};
 
 /* sysfs code */
 ssize_t pwm_show_led0_color(struct device_driver *driver, char *buf) {
@@ -210,7 +268,6 @@ static void output_color(struct bcm2708_pwm* pwm);
 ssize_t pwm_store_led0_color(struct device_driver *driver,
     const char *buf, size_t count) {
   struct ws2812_color color;
-  const char* current_pos = NULL;
 
   if (!global) {
     printk(KERN_ALERT "Trying to set led color, but no PWM device!\n");
@@ -318,7 +375,8 @@ static int initialize_dma(struct device* dev, struct bcm2708_pwm* pwm) {
 
    dma->can_dma = 1;
    dma->allocated_size = PAGE_SIZE;
-   dma->usable_size = PAGE_SIZE - sizeof(struct bcm2708_dma_cb);
+   dma->start_offset = sizeof(struct bcm2708_dma_cb);
+   dma->usable_size = PAGE_SIZE - dma->start_offset;
    dma->used_size = 0;
 
    dma->cb = dma->buf;
@@ -341,10 +399,57 @@ static void release_dma(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   if (!dma->can_dma)
     return;
 
-  /* TODO: stop DMA if active!! */
+  bcm_dma_abort(dma->base); /* TODO return value */
 
   bcm_dma_chan_free(dma->chan);
   dma_free_coherent(&pdev->dev, dma->allocated_size, dma->buf, dma->handle);
+}
+
+static void dma_output_color_list(struct bcm2708_pwm* pwm,
+                                  struct ws2812_color* list, size_t nens) {
+  struct dma_info* dma = &pwm->dma;
+  size_t buf_size;
+  uint32_t* buf_virt;
+  size_t len;
+  unsigned long cb_io;
+  unsigned long buf_io;
+  struct bcm2708_dma_cb* cb;
+
+  if (!dma->can_dma) {
+    printk(KERN_ALERT "Cannot DMA! Aborting list output\n");
+    return;
+  }
+
+  buf_size = dma->usable_size / sizeof(uint32_t);
+  buf_virt = (uint32_t*) (dma->buf + dma->start_offset);
+
+  /* TODO correct? Casts dma_addr_t... */
+  buf_io   = dma->handle + dma->start_offset;
+  cb_io    = dma->handle; /* Because the CB is currently at the page start */
+
+  len = write_ws2812_list_to_buffer(list, nens, buf_virt, buf_size);
+
+  cb = dma->cb;
+  /* write 32 bit words, with no destination address increase, no bursts */
+  cb->info   =   BCM2708_DMA_WAIT_RESP
+               | BCM2708_DMA_D_DREQ
+               | BCM2708_DMA_S_INC
+               | BCM2708_DMA_PER_MAP(5);
+  cb->src    = buf_io;
+  cb->dst    = (unsigned long) pwm_fifo(pwm); /* TODO*/
+  cb->length = len; /* 32 bit words */
+  cb->stride = 0;
+  cb->next   = 0; /* for now no cb chaining */
+  cb->pad[0] = 0;
+  cb->pad[1] = 0;
+
+  printk(KERN_ALERT "Starting dma transfer of lentgh %i\n", len);
+
+  /* For now, since we use coherent memory, no need to flush CB */
+
+  /* Abort if busy, TODO check return value */
+  bcm_dma_abort(dma->base);
+  bcm_dma_start(dma->base, cb_io);
 }
 
 
@@ -425,7 +530,8 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   printk(KERN_ALERT "Initialized DMA\n");
 
   /* Output initial color */
-  output_color(pwm);
+  //output_color(pwm);
+  dma_output_color_list(pwm, test_color_list, ARRAY_SIZE(test_color_list));
 
 out:
   return err;
