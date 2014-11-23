@@ -155,6 +155,8 @@ static void output_single_color(struct bcm2708_pwm* pwm, struct ws2812_color col
   write_data(pwm, current_data);
   
   /* Silence bit is 0 -> reset command for the WS2812 */
+  write_data(pwm, 0);
+  udelay(100);
 }
 
 #undef OUTPUT_COLOR_LOOP
@@ -233,13 +235,14 @@ static void output_color(struct bcm2708_pwm* pwm) {
   writel(32, pwm->base + 0x10);
 
   /* TODO: no DMA yet */
-  set_pwm_ctl(pwm,   CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
+  set_pwm_ctl(pwm, CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
   /* TODO: verify status? */
   
   printk(KERN_ALERT "Outputting single color\n");
 
   output_single_color(pwm, pwm->color);
-  udelay(60);
+  
+  set_pwm_ctl(pwm, 0);
 
   printk(KERN_ALERT "Disabling clock again\n");
   pwm_clock_disable(pwm);
