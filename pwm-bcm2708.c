@@ -1,4 +1,5 @@
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -10,8 +11,9 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 
-#include <mach/platform.h>
+#include <mach/dma.h>
 #include <mach/gpio.h>
+#include <mach/platform.h>
 
 
 #include <asm-generic/gpio.h>
@@ -38,6 +40,29 @@ struct ws2812_color {
   uint8_t blue;
 };
 
+/* For now, we always allocate a DMA of PAGE_SIZE. TODO: improve this,
+ * possibly using scatter/gather (_sg) calls */
+/* TODO: look at if Streaming DMA mappings are useful here,
+ * rather than coherent DMA mappings ...
+ *
+ * For now, we put the DMA CB in the beginning of the DMA region...
+ */
+struct dma_info {
+  int can_dma;
+
+  size_t allocated_size;
+  size_t usable_size;
+  size_t used_size;
+
+  void* buf;
+  dma_addr_t handle; /* IO address of buf */
+
+  int chan;
+  int irq; // TODO don't we need to explicitly acquire it? But not used atm
+  void __iomem *base;
+
+  struct bcm2708_dma_cb* cb;
+};
 
 struct bcm2708_pwm {
   struct mutex mutex;
@@ -51,6 +76,7 @@ struct bcm2708_pwm {
   
   /* To test */
   struct ws2812_color color;
+  struct dma_info dma;
 };
 
 /* TODO */
@@ -249,6 +275,79 @@ static void output_color(struct bcm2708_pwm* pwm) {
   printk(KERN_ALERT "Disabled clock\n");
 }
 
+/* DMA-related code */
+static int initialize_dma(struct device* dev, struct bcm2708_pwm* pwm) {
+  /* We require DMA Channel 5. Try to get it using a HACK
+   * (proper way: add a bcm2708 function to request a specific channel) */
+  int ret;
+  int acquired_chans[5];
+  int acquired_chans_count = 0;
+  int i;
+
+  struct dma_info* dma = &pwm->dma;
+  dma->can_dma = 0;
+
+  /* Channel 5 has BCM_DMA_FEATURE_NORMAL_ORD set... */
+  do {
+    ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_NORMAL_ORD,
+                             &(dma->base), &(dma->irq));
+
+    if (ret < 0) {
+      printk(KERN_ALERT "Failed to acquire DMA channel!\n");
+      goto release_channels;
+    } else if (ret == 5) {
+      /* Correct channel found! */
+      dma->chan = 5;
+      break;
+    }
+
+    acquired_chans[acquired_chans_count++] = ret;
+
+    if (acquired_chans_count >= 5) {
+      printk(KERN_ALERT "Looped over more than 5 DMA channels!\n");
+      goto release_channels;
+    }
+
+  } while(1);
+
+   dma->buf = dma_alloc_coherent(dev, PAGE_SIZE, &(dma->handle), 0 /*flags*/);
+   if (!dma->buf) {
+     printk(KERN_ALERT "Failed to allocate coherent DMA buffer!\n");
+     goto release_channels;
+   }
+
+   dma->can_dma = 1;
+   dma->allocated_size = PAGE_SIZE;
+   dma->usable_size = PAGE_SIZE - sizeof(struct bcm2708_dma_cb);
+   dma->used_size = 0;
+
+   dma->cb = dma->buf;
+
+   ret = 0;
+
+release_channels:
+  if (!dma->can_dma && dma->chan > 0)
+    bcm_dma_chan_free(dma->chan);
+
+  for (i = 0; i < acquired_chans_count; i++)
+    bcm_dma_chan_free(acquired_chans[i]); /* TODO: check errors */
+
+  return ret;
+}
+
+static void release_dma(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
+  struct dma_info* dma = &pwm->dma;
+
+  if (!dma->can_dma)
+    return;
+
+  /* TODO: stop DMA if active!! */
+
+  bcm_dma_chan_free(dma->chan);
+  dma_free_coherent(&pdev->dev, dma->allocated_size, dma->buf, dma->handle);
+}
+
+
 static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   int err = 0;
   int gpio = GPIO_PIN;
@@ -320,6 +419,11 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
   printk(KERN_ALERT "Configuring clock...\n");
   pwm_clock_set_div(pwm, CLOCK_FREQ);
   
+  /* TODO: at least when streaming DMA channels, this should not be (all) done here! */
+  printk(KERN_ALERT "Initializing DMA...\n");
+  initialize_dma(&pdev->dev, pwm);
+  printk(KERN_ALERT "Initialized DMA\n");
+
   /* Output initial color */
   output_color(pwm);
 
@@ -338,7 +442,10 @@ out_free_gpio:
   return err;
 }
 
-static int release_device(struct bcm2708_pwm* pwm) {
+static int release_device(struct platform_device *pdev, struct bcm2708_pwm* pwm) {
+  printk(KERN_ALERT "Releasing DMA...\n");
+  release_dma(pdev, pwm);
+
   printk(KERN_ALERT "Releasing device...\n");
 
   set_pwm_ctl(pwm, 0);
@@ -397,7 +504,7 @@ static int bcm2708_pwm_remove(struct platform_device *pdev)
   printk(KERN_ALERT "pwm_remove\n");
   
   if (global)
-    release_device(global);
+    release_device(pdev, global);
   
   printk(KERN_ALERT "done\n");
   
@@ -432,6 +539,12 @@ static __init int pwm_bcm2708_init(void)
     printk(KERN_ALERT "Unable to allocate platform device!\n");
     goto out;
   }
+
+  /* From bcm2708.c */
+#define DMA_MASK_BITS_COMMON 32
+
+  bcm2708_pwm_device->dev.coherent_dma_mask
+    = DMA_BIT_MASK(DMA_MASK_BITS_COMMON);
 
   ret = platform_device_add_resources(
     bcm2708_pwm_device,
