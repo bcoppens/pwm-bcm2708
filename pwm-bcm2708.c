@@ -193,43 +193,12 @@ ssize_t pwm_store_led0_color(struct device_driver *driver,
     printk(KERN_ALERT "NULL buffer in store!");
     return -ENOMEM;
   }
-    
-  printk(KERN_ALERT "LED string: %i %p %s!\n", count, buf, buf);
+
   mutex_lock(&global->mutex);
-  count = -ENOMEM;
-    goto out;
   
-  if (!kstrtou8(current_pos, 0 /* auto-detect base */, &color.red)) {
-    printk(KERN_ALERT "Error parsing the LED color red!\n");
-    count = -ENOMEM;
-    goto out;
-  }
-
-  current_pos = strstr(current_pos, " ");
-  if (!current_pos) {
-    printk(KERN_ALERT "Did not find a space after red!\n");
-    count = -ENOMEM;
-    goto out;
-  }
-  current_pos++;
-  
-  if (!kstrtou8(current_pos, 0 /* auto-detect base */, &color.green)) {
-    printk(KERN_ALERT "Error parsing the LED color green!\n");
-    count = -ENOMEM;
-    goto out;
-  }
-
-  current_pos = strstr(current_pos, " ");
-  if (!current_pos) {
-    printk(KERN_ALERT "Did not find a space after green!\n");
-    count = -ENOMEM;
-    goto out;
-  }
-  current_pos++;
-  
-  if (!kstrtou8(current_pos, 0 /* auto-detect base */, &color.blue)) {
-    printk(KERN_ALERT "Error parsing the LED color red!\n");
-    count = -ENOMEM;
+  if (sscanf(buf, "%hhu %hhu %hhu", &color.red, &color.green, &color.blue) != 3) {
+    printk(KERN_ALERT "Failed to parse '%s' as an RGB triplet\n", buf);
+    count = -ENOMEM; /* TODO: find a better error code */
     goto out;
   }
   
