@@ -20,8 +20,11 @@
 
 #define DRV_NAME	"bcm2708_pwm"
 
-/* TODO */
+/* Can be found in register documentation wiki */
 #define PWM_BASE (BCM2708_PERI_BASE + 0x20c000)
+
+/* TODO: automatically convert this from PWM_BASE */
+#define PWM_BASE_PERIPHERAL_SPACE 0x7e20c000
 
 #define GPIO_PIN 18
 #define ALT_FUN GPIO_FSEL_ALT5
@@ -503,8 +506,9 @@ static void dma_output_color_list(struct bcm2708_pwm* pwm,
                | BCM2708_DMA_S_INC
                | BCM2708_DMA_PER_MAP(5);
   cb->src    = buf_io;
-  cb->dst    = (unsigned long) pwm_fifo(pwm); /* TODO*/
-  cb->length = len; /* 32 bit words */
+  cb->dst    = PWM_BASE_PERIPHERAL_SPACE + 0x18; /* TODO factor out 0x18 */
+  /* transfer len 32 bit words, DMA engine uses bytes */
+  cb->length = len * sizeof(uint32_t);
   cb->stride = 0;
   cb->next   = 0; /* for now no cb chaining */
   cb->pad[0] = 0;
