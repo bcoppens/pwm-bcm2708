@@ -166,7 +166,7 @@ static void pwm_enable_dma(struct bcm2708_pwm* pwm) {
 }
 
 static void pwm_disable_dma(struct bcm2708_pwm* pwm) {
-  writel(PWM_DMAC_ENAB | PWM_DMAC_PANIC(7) | PWM_DMAC_DREQ(7), pwm_dmac(pwm));
+  writel(0, pwm_dmac(pwm));
 }
 
 /* Test code */
