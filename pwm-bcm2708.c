@@ -372,14 +372,14 @@ static struct attribute *pwm_dev_attrs[] = {
 
 ATTRIBUTE_GROUPS(pwm_dev);
 
-
-static void output_color(struct bcm2708_pwm* pwm) {
-  /* TODO: we should automatically disable it after DMA is done, use IRQ? */
-  pwm_disable_dma(pwm);
-
+/* Does some generic preparation: enable clock, clear FIFO.
+ * Optionally it enables the PWM's DMA configuration.
+ * Then it enables PWM.
+ */
+static void pwm_prepare_and_start(struct bcm2708_pwm* pwm, int start_dma) {
   pwm_clock_enable(pwm);
   printk(KERN_ALERT "Configured clock!\n");
-  
+
   /* Clear PWM STA bus error bit */
   writel(0x100, pwm->base + 0x4);
 
@@ -387,9 +387,19 @@ static void output_color(struct bcm2708_pwm* pwm) {
   set_pwm_ctl(pwm, CTL_CLRFIFO);
   writel(32, pwm->base + 0x10);
 
-  /* TODO: no DMA yet */
+  if (start_dma) {
+    pwm_enable_dma(pwm);
+  }
+
   set_pwm_ctl(pwm, CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
   /* TODO: verify status? */
+}
+
+static void output_color(struct bcm2708_pwm* pwm) {
+  /* TODO: we should automatically disable it after DMA is done, use IRQ? */
+  pwm_disable_dma(pwm);
+
+  pwm_prepare_and_start(pwm, 0 /* no DMA */);
   
   printk(KERN_ALERT "Outputting single color %hhu %hhu %hhu\n", pwm->color.red, pwm->color.green, pwm->color.blue);
 
@@ -514,19 +524,18 @@ static void dma_output_color_list(struct bcm2708_pwm* pwm,
   cb->pad[0] = 0;
   cb->pad[1] = 0;
 
-  printk(KERN_ALERT "Starting dma transfer of length %i\n", len);
+  printk(KERN_ALERT "Starting dma transfer of length %li\n", cb->length);
 
   /* For now, since we use coherent memory, no need to flush CB */
 
   /* Abort if busy, TODO check return value */
   bcm_dma_abort(dma->base);
 
-  pwm_enable_dma(pwm);
-  set_pwm_ctl(pwm, CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
+  pwm_prepare_and_start(pwm, 1 /* DMA */ );
 
   bcm_dma_start(dma->base, cb_io);
 
-  /* TODO: I want to set CTL_PWENABLE1 to 0 again when we are done! */
+  /* TODO: I want to set CTL_PWENABLE1 to 0 again when we are done, and disable the clock! */
 }
 
 
