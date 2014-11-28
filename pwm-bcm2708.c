@@ -71,6 +71,8 @@ struct dma_info {
 struct bcm2708_pwm {
 	struct mutex mutex;
 
+	struct device* dev;
+
 	void __iomem *base;
 	int channel;
 
@@ -115,16 +117,16 @@ static void pwm_clock_set_div(struct bcm2708_pwm *pwm,
 
 	writel(div, pwm->clock.div);
 
-	printk(KERN_ALERT "Set the divider to %x...\n", divider);
+	dev_info(pwm->dev, "Set the divider to %x...\n", divider);
 }
 
 static void pwm_clock_enable(struct bcm2708_pwm *pwm)
 {
 	writel(CM_PASSWD | CM_CTL_CLOCK_OSC, pwm->clock.ctl);
-	printk(KERN_ALERT "Set the oscillator...\n");
+	dev_info(pwm->dev, "Set the oscillator...\n");
 
 	writel(CM_PASSWD | CM_CTL_CLOCK_OSC | CM_CTL_ENAB, pwm->clock.ctl);
-	printk(KERN_ALERT "Enabled clock...\n");
+	dev_info(pwm->dev, "Enabled clock...\n");
 }
 
 static void pwm_clock_disable(struct bcm2708_pwm *pwm)
@@ -306,26 +308,27 @@ static ssize_t pwm_store_led0_color(struct device_driver *driver,
 	struct ws2812_color color;
 
 	if (!global) {
-		printk(KERN_ALERT
+		printk(KERN_WARNING "bcm2708_pwm: "
 		       "Trying to set led color, but no PWM device!\n");
 		return -ENOMEM;
 	}
 
 	if (!buf) {
-		printk(KERN_ALERT "NULL buffer in store!");
+		printk(KERN_WARNING "bcm2708_pwm: NULL buffer in store!");
 		return -ENOMEM;
 	}
 
-	if (sscanf(buf, "%hhu %hhu %hhu", &color.red, &color.green, &color.blue)
-	    != 3) {
-		printk(KERN_ALERT "Failed to parse '%s' as an RGB triplet\n",
+	if (sscanf(buf, "%hhu %hhu %hhu",
+		   &color.red, &color.green, &color.blue) != 3) {
+		printk(KERN_WARNING "bcm2708_pwm: "
+		       "Failed to parse '%s' as an RGB triplet\n",
 		       buf);
 		count = -ENOMEM;	/* TODO: find a better error code */
 		goto out;
 	}
 
-	printk(KERN_ALERT "Setting LED color to %i %i %i\n", color.red,
-	       color.green, color.blue);
+	printk(KERN_INFO "bcm2708_pwm: Setting LED color to %i %i %i\n",
+	       color.red, color.green, color.blue);
 
 	mutex_lock(&global->mutex);
 	global->color = color;
@@ -349,13 +352,13 @@ static ssize_t pwm_store_led0_color_string(struct device_driver *driver,
 	int elements_read = 0;
 
 	if (!global) {
-		printk(KERN_ALERT
+		printk(KERN_WARNING
 		       "Trying to set led color, but no PWM device!\n");
 		return -ENOMEM;
 	}
 
 	if (!buf) {
-		printk(KERN_ALERT "NULL buffer in store!");
+		printk(KERN_WARNING "NULL buffer in store!");
 		return -ENOMEM;
 	}
 
@@ -374,7 +377,7 @@ static ssize_t pwm_store_led0_color_string(struct device_driver *driver,
 		buf++;		/* skip the space */
 	}
 
-	printk(KERN_ALERT "Setting %i new colors\n", elements_read);
+	printk(KERN_INFO "bcm2708_pwm: Setting %i new colors\n", elements_read);
 
 	mutex_lock(&global->mutex);
 	dma_output_color_list(global, sysfs_color_list, elements_read);
@@ -404,7 +407,7 @@ ATTRIBUTE_GROUPS(pwm_dev);
 static void pwm_prepare_and_start(struct bcm2708_pwm *pwm, int start_dma)
 {
 	pwm_clock_enable(pwm);
-	printk(KERN_ALERT "Configured clock!\n");
+	dev_info(pwm->dev, "Configured clock!\n");
 
 	/* Clear PWM STA bus error bit */
 	writel(0x100, pwm->base + 0x4);
@@ -428,20 +431,20 @@ static void output_color(struct bcm2708_pwm *pwm)
 
 	pwm_prepare_and_start(pwm, 0 /* no DMA */ );
 
-	printk(KERN_ALERT "Outputting single color %hhu %hhu %hhu\n",
+	dev_dbg(pwm->dev, "Outputting single color %hhu %hhu %hhu\n",
 	       pwm->color.red, pwm->color.green, pwm->color.blue);
 
 	output_single_color(pwm, pwm->color);
 
 	set_pwm_ctl(pwm, 0);
 
-	printk(KERN_ALERT "Disabling clock again\n");
+	dev_info(pwm->dev, "Disabling clock again\n");
 	pwm_clock_disable(pwm);
-	printk(KERN_ALERT "Disabled clock\n");
+	dev_info(pwm->dev, "Disabled clock\n");
 }
 
 /* DMA-related code */
-static int initialize_dma(struct device *dev, struct bcm2708_pwm *pwm)
+static int initialize_dma(struct bcm2708_pwm *pwm)
 {
 	/* We require DMA Channel 5. Try to get it using a HACK
 	 * (proper way: add a bcm2708 function to request a specific channel) */
@@ -449,6 +452,7 @@ static int initialize_dma(struct device *dev, struct bcm2708_pwm *pwm)
 	int acquired_chans[5];
 	int acquired_chans_count = 0;
 	int i;
+	struct device *dev = pwm->dev;
 
 	struct dma_info *dma = &pwm->dma;
 	dma->can_dma = 0;
@@ -459,7 +463,7 @@ static int initialize_dma(struct device *dev, struct bcm2708_pwm *pwm)
 					 &(dma->base), &(dma->irq));
 
 		if (ret < 0) {
-			printk(KERN_ALERT "Failed to acquire DMA channel!\n");
+			dev_warn(dev, "Failed to acquire DMA channel!\n");
 			goto release_channels;
 		} else if (ret == 5) {
 			/* Correct channel found! */
@@ -470,7 +474,7 @@ static int initialize_dma(struct device *dev, struct bcm2708_pwm *pwm)
 		acquired_chans[acquired_chans_count++] = ret;
 
 		if (acquired_chans_count >= 5) {
-			printk(KERN_ALERT
+			dev_warn(dev,
 			       "Looped over more than 5 DMA channels!\n");
 			goto release_channels;
 		}
@@ -480,7 +484,7 @@ static int initialize_dma(struct device *dev, struct bcm2708_pwm *pwm)
 	dma->buf =
 	    dma_alloc_coherent(dev, PAGE_SIZE, &(dma->handle), 0 /*flags */ );
 	if (!dma->buf) {
-		printk(KERN_ALERT "Failed to allocate coherent DMA buffer!\n");
+		dev_warn(dev, "Failed to allocate coherent DMA buffer!\n");
 		goto release_channels;
 	}
 
@@ -530,7 +534,7 @@ static void dma_output_color_list(struct bcm2708_pwm *pwm,
 	struct bcm2708_dma_cb *cb;
 
 	if (!dma->can_dma) {
-		printk(KERN_ALERT "Cannot DMA! Aborting list output\n");
+		dev_warn(pwm->dev, "Cannot DMA! Aborting list output\n");
 		return;
 	}
 
@@ -556,7 +560,7 @@ static void dma_output_color_list(struct bcm2708_pwm *pwm,
 	cb->pad[0] = 0;
 	cb->pad[1] = 0;
 
-	printk(KERN_ALERT "Starting dma transfer of length %li\n", cb->length);
+	dev_dbg(pwm->dev, "Starting dma transfer of length %li\n", cb->length);
 
 	/* For now, since we use coherent memory, no need to flush CB */
 
@@ -588,11 +592,13 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 	color.green = 0;
 	color.blue = 125;
 	pwm->color = color;
+	
+	pwm->dev = &pdev->dev;
 
 	regs_pwm =
 	    platform_get_resource_byname(pdev, IORESOURCE_MEM, "io-memory-pwm");
 	if (!regs_pwm) {
-		printk(KERN_ALERT "Failed to acquire IO resources for PWM\n");
+		dev_warn(pwm->dev, "Failed to acquire IO resources for PWM\n");
 		err = -ENOMEM;
 		goto out;
 	}
@@ -601,7 +607,7 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 	    platform_get_resource_byname(pdev, IORESOURCE_MEM,
 					 "io-memory-cm-pwm");
 	if (!regs_cm_pwm) {
-		printk(KERN_ALERT
+		dev_warn(pwm->dev,
 		       "Failed to acquire IO resources for CM_PWM\n");
 		err = -ENOMEM;
 		goto out;
@@ -609,7 +615,7 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 
 	err = gpio_request(gpio, "pwm");
 	if (err) {
-		printk(KERN_ALERT "Failed to acquire gpio pin\n");
+		dev_warn(pwm->dev, "Failed to acquire gpio pin\n");
 		goto out;
 	}
 
@@ -627,7 +633,7 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 
 	pwm->base = ioremap(regs_pwm->start, resource_size(regs_pwm));
 	if (!pwm->base) {
-		printk(KERN_ALERT "Failed to remap IO resources for PWM\n");
+		dev_warn(pwm->dev, "Failed to remap IO resources for PWM\n");
 		err = -ENOMEM;
 		goto out_free_gpio;
 	}
@@ -635,25 +641,25 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 	pwm->clock.ctl =
 	    ioremap(regs_cm_pwm->start, resource_size(regs_cm_pwm));
 	if (!pwm->base) {
-		printk(KERN_ALERT "Failed to remap IO resources for CM PWM\n");
+		dev_warn(pwm->dev, "Failed to remap IO resources for CM PWM\n");
 		err = -ENOMEM;
 		goto out_free_iomem_pwm;
 	}
 
 	pwm->clock.div = pwm->clock.ctl + CM_PWM_DIV_OFFSET;
 
-	printk(KERN_ALERT "pwm->base = %p (PWM_BASE %p)\n", pwm->base,
+	dev_info(pwm->dev, "pwm->base = %p (PWM_BASE %p)\n", pwm->base,
 	       (void *)PWM_BASE);
-	printk(KERN_ALERT "pwmclock = %p (PWM_BASE %p)\n", pwm->clock.ctl,
+	dev_info(pwm->dev, "pwmclock = %p (PWM_BASE %p)\n", pwm->clock.ctl,
 	       (void *)CM_PWM_CTL);
 
-	printk(KERN_ALERT "Configuring clock...\n");
+	dev_info(pwm->dev, "Configuring clock...\n");
 	pwm_clock_set_div(pwm, CLOCK_FREQ);
 
 	/* TODO: at least when streaming DMA channels, this should not be (all) done here! */
-	printk(KERN_ALERT "Initializing DMA...\n");
-	initialize_dma(&pdev->dev, pwm);
-	printk(KERN_ALERT "Initialized DMA\n");
+	dev_info(pwm->dev, "Initializing DMA...\n");
+	initialize_dma(pwm);
+	dev_info(pwm->dev, "Initialized DMA\n");
 
 	/* Output initial color */
 	//output_color(pwm);
@@ -677,17 +683,16 @@ out_free_gpio:
 
 static int release_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 {
-	printk(KERN_ALERT "Releasing DMA...\n");
+	dev_info(pwm->dev, "Releasing DMA...\n");
 	release_dma(pdev, pwm);
 
-	printk(KERN_ALERT "Releasing device...\n");
-
+	dev_info(pwm->dev, "Releasing device...\n");
 	set_pwm_ctl(pwm, 0);
 
 	iounmap(pwm->base);
 	gpio_free(pwm->gpio);
 
-	printk(KERN_ALERT "Released device...\n");
+	dev_info(pwm->dev, "Released device...\n");
 
 	return 0;
 }
@@ -720,13 +725,12 @@ static int bcm2708_pwm_probe(struct platform_device *pdev)
 {
 	int ret = 0;
 
-	printk(KERN_ALERT "pwm_probe\n");
-
 	global = &global_;
 
 	ret = setup_device(pdev, global);
 	if (ret) {
-		printk(KERN_ALERT "setup device failed!\n");
+		/* This should already have printed an dev_warn */
+		dev_info(&pdev->dev, "setup device failed!\n");
 		global = NULL;
 	}
 
@@ -735,12 +739,12 @@ static int bcm2708_pwm_probe(struct platform_device *pdev)
 
 static int bcm2708_pwm_remove(struct platform_device *pdev)
 {
-	printk(KERN_ALERT "pwm_remove\n");
+	dev_info(&pdev->dev, "pwm_remove\n");
 
 	if (global)
 		release_device(pdev, global);
 
-	printk(KERN_ALERT "done\n");
+	dev_info(&pdev->dev, "done\n");
 
 	return 0;
 }
@@ -766,12 +770,12 @@ static __init int pwm_bcm2708_init(void)
 {
 	int ret = 0;
 
-	printk(KERN_ALERT "Hello... registring platform driver\n");
+	printk(KERN_INFO "pwm_bcm2708: Hello... registring platform driver\n");
 
 	bcm2708_pwm_device = platform_device_alloc("bcm2708_pwm", 0);
 	if (!bcm2708_pwm_device) {
 		ret = -ENOMEM;
-		printk(KERN_ALERT "Unable to allocate platform device!\n");
+		printk(KERN_ALERT "pwm_bcm2708: Unable to allocate platform device!\n");
 		goto out;
 	}
 
@@ -786,13 +790,13 @@ static __init int pwm_bcm2708_init(void)
 					    ARRAY_SIZE(bcm2708_pwm_resources));
 
 	if (ret) {
-		printk(KERN_ALERT "Unable to add platform resources!\n");
+		printk(KERN_ALERT "pwm_bcm2708: Unable to add platform resources!\n");
 		goto out;
 	}
 
 	ret = platform_device_add(bcm2708_pwm_device);
 	if (ret) {
-		printk(KERN_ALERT "Unable to add platform device!\n");
+		printk(KERN_ALERT "pwm_bcm2708: Unable to add platform device!\n");
 		goto out;
 	}
 
@@ -807,11 +811,11 @@ out:
 static __exit void pwm_bcm2708_exit(void)
 {
 	/* TODO: don't unregister if not (succesfully) registered */
-	printk(KERN_ALERT "Goodbye\n");
+	printk(KERN_INFO "pwm_bcm2708: Goodbye\n");
 	platform_driver_unregister(&bcm2708_pwm_driver);
-	printk(KERN_ALERT "Driver unregistered\n");
+	printk(KERN_INFO "pwm_bcm2708: Driver unregistered\n");
 	platform_device_unregister(bcm2708_pwm_device);
-	printk(KERN_ALERT "Device unregistered\n");
+	printk(KERN_INFO "pwm_bcm2708: Device unregistered\n");
 }
 
 module_init(pwm_bcm2708_init);
