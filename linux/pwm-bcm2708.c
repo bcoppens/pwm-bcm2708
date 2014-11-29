@@ -524,13 +524,9 @@ static void release_dma(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 			  dma->handle);
 }
 
-static void dma_output_color_list(struct bcm2708_pwm *pwm,
-				  struct ws2812_color *list, size_t nens)
-{
+/* This assumes the data is already in the pwm->dma buffer */
+static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 	struct dma_info *dma = &pwm->dma;
-	size_t buf_size;
-	uint32_t *buf_virt;
-	size_t len;
 	unsigned long cb_io;
 	unsigned long buf_io;
 	struct bcm2708_dma_cb *cb;
@@ -540,14 +536,8 @@ static void dma_output_color_list(struct bcm2708_pwm *pwm,
 		return;
 	}
 
-	buf_size = dma->usable_size / sizeof(uint32_t);
-	buf_virt = (uint32_t *) (dma->buf + dma->start_offset);
-
-	/* TODO correct? Casts dma_addr_t... */
 	buf_io = dma->handle + dma->start_offset;
 	cb_io = dma->handle;	/* Because the CB is currently at the page start */
-
-	len = write_ws2812_list_to_buffer(list, nens, buf_virt, buf_size);
 
 	cb = dma->cb;
 	/* write 32 bit words, with no destination address increase, no bursts */
@@ -556,7 +546,7 @@ static void dma_output_color_list(struct bcm2708_pwm *pwm,
 	cb->src = buf_io;
 	cb->dst = PWM_BASE_PERIPHERAL_SPACE + 0x18;	/* TODO factor out 0x18 */
 	/* transfer len 32 bit words, DMA engine uses bytes */
-	cb->length = len * sizeof(uint32_t);
+	cb->length = len;
 	cb->stride = 0;
 	cb->next = 0;		/* for now no cb chaining */
 	cb->pad[0] = 0;
@@ -574,6 +564,28 @@ static void dma_output_color_list(struct bcm2708_pwm *pwm,
 	bcm_dma_start(dma->base, cb_io);
 
 	/* TODO: I want to set CTL_PWENABLE1 to 0 again when we are done, and disable the clock! */
+}
+
+static void dma_output_color_list(struct bcm2708_pwm *pwm,
+				  struct ws2812_color *list, size_t nens)
+{
+	struct dma_info *dma = &pwm->dma;
+	size_t buf_size;
+	uint32_t *buf_virt;
+	size_t len;
+
+	if (!dma->can_dma) {
+		dev_warn(pwm->dev, "Cannot DMA! Aborting list output\n");
+		return;
+	}
+
+	/* We write uint32_t's, but the actual size for DMA is in bytes */
+	buf_size = dma->usable_size / sizeof(uint32_t);
+	buf_virt = (uint32_t *) (dma->buf + dma->start_offset);
+
+	len = write_ws2812_list_to_buffer(list, nens, buf_virt, buf_size);
+
+	pwm_dma_output(pwm, len * sizeof(uint32_t));
 }
 
 static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
