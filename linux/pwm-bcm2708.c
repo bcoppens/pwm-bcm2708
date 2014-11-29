@@ -1,5 +1,7 @@
+#include <linux/cdev.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/fs.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -260,7 +262,7 @@ done:
 #undef OUTPUT_COLOR_LOOP
 #undef OUTPUT_BIT
 
-static struct ws2812_color test_color_list[] = {
+static struct ws2812_color test_color_list_[] = {
 	{125,	0,	0},
 	{0,	125,	0},
 	{0,	0,	125},
@@ -270,7 +272,7 @@ static struct ws2812_color test_color_list[] = {
 };
 
 /* To quickly clear the LEDs */
-static struct ws2812_color test_color_list_[] = {
+static struct ws2812_color test_color_list[] = {
 	{0, 0, 0},
 	{0, 0, 0},
 	{0, 0, 0},
@@ -697,6 +699,76 @@ static int release_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 	return 0;
 }
 
+/* Character device */
+struct bcm2708_pwm_cdev {
+	struct cdev cdev;
+	struct mutex mutex;
+
+	dev_t dev;
+
+	struct bcm2708_pwm *pwm;
+};
+
+/* TODO: assume, for now, we only have one */
+static struct bcm2708_pwm_cdev pwm_cdev_;
+static struct bcm2708_pwm_cdev* pwm_cdev = NULL;
+
+int pwm_cdev_open(struct inode *inode, struct file *filp)
+{
+	dev_info(pwm_cdev->pwm->dev, "cdev opened\n");
+	return 0;
+}
+
+int pwm_cdev_release(struct inode *inode, struct file *filp)
+{
+	dev_info(pwm_cdev->pwm->dev, "cdev closed\n");
+	return 0;
+}
+
+static struct file_operations pwm_cdev_fops = {
+	.owner	= THIS_MODULE,
+	.open	= pwm_cdev_open,
+	.release= pwm_cdev_release
+};
+
+static int init_pwm_cdev(struct bcm2708_pwm *pwm)
+{
+	int err;
+	dev_t dev;
+
+	err = alloc_chrdev_region(&dev, 0, 1, "bcm2708_pwm");
+	if (err) {
+		dev_warn(pwm->dev, "Could not allocate chrdev region\n");
+		return err;
+	}
+
+	cdev_init(&pwm_cdev_.cdev, &pwm_cdev_fops);
+	pwm_cdev_.cdev.owner = THIS_MODULE;
+
+	err = cdev_add(&pwm_cdev_.cdev, dev, 1);
+	if (err) {
+		dev_warn(pwm->dev, "Could not add cdev\n");
+		goto out;
+	}
+
+	mutex_init(&pwm_cdev_.mutex);
+	pwm_cdev_.pwm = pwm;
+	pwm_cdev_.dev = dev;
+
+	pwm_cdev = &pwm_cdev_;
+	return 0;
+
+out:
+	unregister_chrdev_region(dev, 1);
+	return err;
+}
+
+static void release_pwm_cdev(struct bcm2708_pwm_cdev* pwm_cdev)
+{
+	cdev_del(&pwm_cdev->cdev);
+	unregister_chrdev_region(pwm_cdev->dev, 1);
+}
+
 /* platform device */
 /* TODO: this should be moved into linux/arch/arm/mach-bcm2708/bcm2708.c */
 /* TODO: device tree? */
@@ -724,16 +796,21 @@ static struct platform_device *bcm2708_pwm_device;
 static int bcm2708_pwm_probe(struct platform_device *pdev)
 {
 	int ret = 0;
+	struct bcm2708_pwm *pwm = &global_;
 
-	global = &global_;
+	ret = setup_device(pdev, pwm);
+	if (ret)
+		goto err;
 
-	ret = setup_device(pdev, global);
+	ret = init_pwm_cdev(pwm);
 	if (ret) {
-		/* This should already have printed an dev_warn */
-		dev_info(&pdev->dev, "setup device failed!\n");
-		global = NULL;
+		release_device(pdev, pwm);
+		goto err;
 	}
 
+	global = pwm;
+
+err:
 	return ret;
 }
 
@@ -741,8 +818,10 @@ static int bcm2708_pwm_remove(struct platform_device *pdev)
 {
 	dev_info(&pdev->dev, "pwm_remove\n");
 
-	if (global)
+	if (global) {
+		release_pwm_cdev(pwm_cdev);
 		release_device(pdev, global);
+	}
 
 	dev_info(&pdev->dev, "done\n");
 
