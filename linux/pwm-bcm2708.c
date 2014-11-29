@@ -17,6 +17,8 @@
 #include <mach/gpio.h>
 #include <mach/platform.h>
 
+#include <asm/uaccess.h>
+
 #include <asm-generic/gpio.h>
 
 #define DRV_NAME	"bcm2708_pwm"
@@ -737,10 +739,60 @@ int pwm_cdev_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
+/* Quick method for testing, no ioctl yet */
+/* TODO: locking of pwm_cdev! */
+ssize_t pwm_cdev_write(struct file *filp, const char __user *buf,
+		      size_t count, loff_t* offp)
+{
+	struct dma_info *dma;
+	struct bcm2708_pwm *pwm;
+	size_t buf_size;
+	uint32_t *buf_virt;
+	size_t out = count;
+
+	if (!pwm_cdev) {
+		printk(KERN_WARNING "bcm2708_pwm: no pwm cdevice!\n");
+		return -ENOMEM;
+	}
+
+	pwm = pwm_cdev->pwm;
+
+	mutex_lock(&pwm->mutex);
+	dma = &pwm->dma;
+
+	if (!dma->can_dma) {
+		dev_warn(pwm->dev, "Cannot DMA! Aborting list output\n");
+		out = -EFAULT;
+		goto out;
+	}
+
+	buf_size = dma->usable_size;
+	buf_virt = dma->buf + dma->start_offset;
+
+	if (count > buf_size) {
+		out = -ENOMEM;
+		goto out;
+	}
+
+	if (copy_from_user(buf_virt, buf, count)) {
+		out = -EFAULT;
+		goto out;
+	}
+
+	pwm_dma_output(pwm, count);
+
+	/* Don't update offp for now */
+
+out:
+	mutex_unlock(&pwm->mutex);
+	return out;
+}
+
 static struct file_operations pwm_cdev_fops = {
 	.owner	= THIS_MODULE,
 	.open	= pwm_cdev_open,
-	.release= pwm_cdev_release
+	.release= pwm_cdev_release,
+	.write	= pwm_cdev_write
 };
 
 static int init_pwm_cdev(struct bcm2708_pwm *pwm)
