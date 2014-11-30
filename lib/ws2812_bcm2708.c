@@ -69,7 +69,17 @@ done:
 #undef OUTPUT_BIT
 
 
+/* TODO: don't hardcode buffersize to 4096 */
 void ws28128_bcm2708_render(struct ws2812_array* array, struct ws28128_bcm2708* out) {
-  out->buffer = malloc(4096); /* TODO */
+  if (out->buffer) {
+    if (out->buffer_size != 4096) {
+      free(out->buffer);
+      out->buffer = malloc(4096);
+      out->buffer_size = 4096;
+    }
+  } else {
+    out->buffer = malloc(4096);
+    out->buffer_size = 4096;
+  }
   out->size = sizeof(uint32_t) * write_ws2812_list_to_buffer(array->colors, array->count, (uint32_t*)out->buffer, 4096);
 }

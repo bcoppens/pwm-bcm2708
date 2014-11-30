@@ -20,6 +20,7 @@ struct ws2812_array {
 
 struct ws28128_bcm2708 {
   void* buffer;
+  size_t buffer_size;
   size_t size;
 };
 
