@@ -20,7 +20,7 @@ Build instructions:
 * Build the libs and demo app:
   cd pwm-bcm2708/
   mkdir build ; cd build
-  CC=arm-unknown-linux-gnueabi-gcc cmake .. && make
+  CC=arm-unknown-linux-gnueabi-gcc CXX=arm-unknown-linux-gnueabi-g++ cmake .. && make
 * Copy the files over to your Pi
   insmod pwm-bcm2708.ko
   mknod dev_pwm c `grep pwm /proc/devices | cut '-d ' -f1` 0

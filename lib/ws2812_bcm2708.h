@@ -4,6 +4,10 @@
 #include <stddef.h> /* size_t */
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Serialize single color, as GREEN RED BLUE */
 struct ws2812_color {
   uint8_t red;
@@ -25,5 +29,10 @@ struct ws28128_bcm2708 {
 };
 
 void ws28128_bcm2708_render(struct ws2812_array* array, struct ws28128_bcm2708* out);
+
+#ifdef __cplusplus
+}
+#endif
+
 
 #endif /* WS2812_BCM2708_H_ */
