@@ -559,7 +559,10 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 	/* For now, since we use coherent memory, no need to flush CB */
 
 	/* Abort if busy, TODO check return value */
-	bcm_dma_abort(dma->base);
+	if (bcm_dma_is_busy(dma->base)) {
+		dev_info(pwm->dev, "DMA busy, aborting it first\n");
+		bcm_dma_abort(dma->base);
+	}
 
 	pwm_prepare_and_start(pwm, 1 /* DMA */ );
 

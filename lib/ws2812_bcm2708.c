@@ -52,7 +52,9 @@ static size_t write_ws2812_list_to_buffer(struct ws2812_color *list,
 
   TO_BUFFER;
   
-  /* TODO: once we want to support notifications of finished rendering a frame, we should append the 60ns delay time explicitly in the buffer! */
+  /* There is a delay of >= 50 µs, so, say, 55µs, @ 2.4MHz, so 132 bits, i.e., 5 uint32_t's */
+  for(i = 0; i < 5; i++)
+    TO_BUFFER;
   
 done:
   if (buf_pos >= buffer_size)
