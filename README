@@ -1,0 +1,31 @@
+Linux kernel driver for the Broadcom 2708 PWM peripheral, for use with WS2812 LED strips by Bart Coppens.
+
+This project was inspired by https://github.com/jgarff/rpi_ws281x which does roughly the same, but all in userspace. I didn't like the
+idea of userspace doing DMA and driving my peripherals without the kernel's knowledge, and this was a nice reason to write a kernel
+driver and experiment with it.
+
+Tested on my Raspberry Pi B+ with an Adafruit NeoPixel Ring with 16 WS2812 LEDs.
+
+Directory structure:
+* linux/ Linux kernel module, and the required (small) kernel patch for kernel 3.16.5
+* lib/ Code to access the kernel module's character device
+* apps/ Test example using the code in lib/ to drive a NeoPixel ring
+
+Build instructions:
+* Build a patched 3.16.5 kernel
+* build the kernel module:
+  cd pwm-bcm2708/linux
+  ARCH=arm CROSS_COMPILE=${CCPREFIX} KERNELDIR=${KERNEL_SRC}/ make
+  where CCPREFIX is /path/to/crosscompiler/arm-unknown-linux-gnueabi-
+* Build the libs and demo app:
+  cd pwm-bcm2708/
+  mkdir build ; cd build
+  CC=arm-unknown-linux-gnueabi-gcc cmake .. && make
+* Copy the files over to your Pi
+  insmod pwm-bcm2708.ko
+  mknod dev_pwm c `grep pwm /proc/devices | cut '-d ' -f1` 0
+  build/apps/ws2812_bcm2708_demo dev_test
+
+Sources:
+* https://github.com/jgarff/rpi_ws281x
+* https://github.com/hermanhermitage/videocoreiv/wiki
