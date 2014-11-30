@@ -18,9 +18,27 @@ const int ring_size = 16;
 const int ms_per_frame = 125;
 const int max_brightness = 140;
 
-static void output_list(struct ws2812_array* list, struct pwm_bwm2708_dev* pwm, struct ws28128_bcm2708* out) {
-  ws28128_bcm2708_render(list, out);
-  pwm_bwm2708_write_data(pwm, out->buffer, out->size);
+/* I want 0 to be on the top, 1 to the right of it, etc..., so this maps
+ * those coordinates to the ones that are in use on the current orientation
+ * of the LED ring */
+struct LEDMapper {
+  bool flip;
+  int  offset;
+
+  LEDMapper(bool flip, int offset) : flip(flip), offset(offset) {}
+  int operator()(int n) {
+    if (flip)
+      n = ring_size - n;
+
+    return (n + offset) % ring_size;
+  }
+};
+
+LEDMapper mapper(true, 3);
+
+static void output_list(struct ws2812_array& list, struct pwm_bwm2708_dev* pwm, struct ws28128_bcm2708& out) {
+  ws28128_bcm2708_render(&list, &out);
+  pwm_bwm2708_write_data(pwm, out.buffer, out.size);
 }
 
 template<typename T>
@@ -45,8 +63,8 @@ static ws2812_color color_fraction(const ws2812_color& color, float fraction) {
 }
 
 static void add_blend_at(ws2812_array& list, const ws2812_color& color, float pos) {
-  int low_pos  = floor(pos);
-  int next_pos = (low_pos + 1) % ring_size;
+  int low_pos  = mapper(floor(pos));
+  int next_pos = mapper((int(floor(pos)) + 1) % ring_size);
 
   float mix_high = pos - floor(pos);
   float mix_low  = 1.0 - mix_high;
@@ -99,6 +117,10 @@ void set_colors_for_now(ws2812_array& colors) {
   float minutes_pos = float(ms.count()) / 60.0 / 1000.0;
   float seconds_pos = float(ms.count() - 60*1000*floor(minutes_pos)) / 1000.0;
 
+  /* No 24h hours */
+  if (hours_pos >= 12.0)
+    hours_pos -= 12;
+
   colors = clean_colors;
   add_blend_at(colors, hours_color, hours_pos * float(ring_size)/12.0);
   add_blend_at(colors, minutes_color, minutes_pos * float(ring_size)/60.0);
@@ -119,7 +141,7 @@ int main(int argc, char** argv) {
 
   while(true) {
     set_colors_for_now(colors);
-    output_list(&colors, pwm, &out);
+    output_list(colors, pwm, out);
 
     this_thread::sleep_for(rest);
   }
