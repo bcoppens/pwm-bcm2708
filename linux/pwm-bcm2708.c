@@ -37,6 +37,9 @@
 struct clock {
 	void __iomem *ctl;
 	void __iomem *div;
+
+	uint32_t current_freq;
+	int enabled;
 };
 
 /* Serialize single color, as GREEN RED BLUE */
@@ -115,27 +118,40 @@ struct bcm2708_pwm *global = NULL;
 static void pwm_clock_set_div(struct bcm2708_pwm *pwm,
 			      uint32_t target_frequency)
 {
+	uint32_t divider;
+	uint32_t div;
+
+	if (pwm->clock.current_freq == target_frequency)
+		return;
+
 	/* Use integer divider on the 19.2MHz oscillator, no MASH */
-	uint32_t divider = OSCILLATOR_FREQUENCY / target_frequency;
-	uint32_t div = CM_PASSWD | (divider << 12);
+	divider = OSCILLATOR_FREQUENCY / target_frequency;
+	div = CM_PASSWD | (divider << 12);
 
 	writel(div, pwm->clock.div);
+	pwm->clock.current_freq = target_frequency;
 
 	dev_info(pwm->dev, "Set the divider to %x...\n", divider);
 }
 
 static void pwm_clock_enable(struct bcm2708_pwm *pwm)
 {
+	if (pwm->clock.enabled)
+		return;
+
 	writel(CM_PASSWD | CM_CTL_CLOCK_OSC, pwm->clock.ctl);
-	dev_info(pwm->dev, "Set the oscillator...\n");
+	dev_dbg(pwm->dev, "Set the oscillator...\n");
 
 	writel(CM_PASSWD | CM_CTL_CLOCK_OSC | CM_CTL_ENAB, pwm->clock.ctl);
-	dev_info(pwm->dev, "Enabled clock...\n");
+	pwm->clock.enabled = 1;
+
+	dev_dbg(pwm->dev, "Enabled clock...\n");
 }
 
 static void pwm_clock_disable(struct bcm2708_pwm *pwm)
 {
 	writel(CM_PASSWD, pwm->clock.ctl);
+	pwm->clock.enabled = 0;
 }
 
 /* PWM Control register flags.
@@ -411,7 +427,7 @@ ATTRIBUTE_GROUPS(pwm_dev);
 static void pwm_prepare_and_start(struct bcm2708_pwm *pwm, int start_dma)
 {
 	pwm_clock_enable(pwm);
-	dev_info(pwm->dev, "Configured clock!\n");
+	dev_dbg(pwm->dev, "Configured clock!\n");
 
 	/* Clear PWM STA bus error bit */
 	writel(0x100, pwm->base + 0x4);
