@@ -4,6 +4,7 @@
 #include <linux/fs.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -69,8 +70,11 @@ struct dma_info {
 	dma_addr_t handle;	/* IO address of buf */
 
 	int chan;
-	int irq;		// TODO don't we need to explicitly acquire it? But not used atm
+	int irq;		// TODO don't we need to explicitly acquire it?
+
 	void __iomem *base;
+
+	int use_interrupt;
 
 	struct bcm2708_dma_cb *cb;
 };
@@ -90,6 +94,8 @@ struct bcm2708_pwm {
 	/* To test */
 	struct ws2812_color color;
 	struct dma_info dma;
+
+	int blocking_io;
 };
 
 /* TODO */
@@ -464,6 +470,23 @@ static void output_color(struct bcm2708_pwm *pwm)
 }
 
 /* DMA-related code */
+
+/* Manually acknowledge the IRQ to the DMA controller. This code should
+ * really also be in mach-bcm2708/dma.c/h! (TODO)  */
+#define BCM2708_DMA_INT_CLEAR (1 << 2)
+static void bcm_dma_irq_ack(void __iomem *dma_chan_base) {
+	writel(BCM2708_DMA_INT_CLEAR,
+	       dma_chan_base + BCM2708_DMA_CS);
+}
+
+irqreturn_t pwm_dma_interrupt_handler(int irq, void *dev_id) {
+	/* TODO: should we use dev_id to pass along the dma struct? */
+	/* TODO locking...*/
+	bcm_dma_irq_ack(global->dma.base);
+
+	return IRQ_HANDLED;
+}
+
 static int initialize_dma(struct bcm2708_pwm *pwm)
 {
 	/* We require DMA Channel 5. Try to get it using a HACK
@@ -516,6 +539,22 @@ static int initialize_dma(struct bcm2708_pwm *pwm)
 
 	dma->cb = dma->buf;
 
+	if (dma->irq) {
+		/* TODO: fast irq? TODO I'm assuming: not shared? */
+		if (dma->irq == IRQ_DMA5) {
+			if (request_irq(dma->irq, pwm_dma_interrupt_handler,
+					0, /* flags: not fast, not shared */
+					DRV_NAME,
+					NULL)) {
+				dev_info(dev, "Could not get IRQ\n");
+				dma->irq = 0;
+			}
+		} else {
+			dev_info(dev, "Got IRQ: %i\n", dma->irq);
+			dma->irq = 0;
+		}
+	}
+
 	ret = 0;
 
 release_channels:
@@ -534,6 +573,9 @@ static void release_dma(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 
 	if (!dma->can_dma)
 		return;
+
+	if (dma->irq)
+		free_irq(dma->irq, NULL);
 
 	bcm_dma_abort(dma->base);	/* TODO return value */
 
@@ -561,6 +603,11 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 	/* write 32 bit words, with no destination address increase, no bursts */
 	cb->info = BCM2708_DMA_WAIT_RESP
 	    | BCM2708_DMA_D_DREQ | BCM2708_DMA_S_INC | BCM2708_DMA_PER_MAP(5);
+
+	if (dma->irq && pwm->blocking_io) {
+		cb->info |= BCM2708_DMA_INT_EN;
+	}
+
 	cb->src = buf_io;
 	cb->dst = PWM_BASE_PERIPHERAL_SPACE + 0x18;	/* TODO factor out 0x18 */
 	/* transfer len 32 bit words, DMA engine uses bytes */
@@ -748,7 +795,14 @@ static struct bcm2708_pwm_cdev* pwm_cdev = NULL;
 
 int pwm_cdev_open(struct inode *inode, struct file *filp)
 {
+	struct bcm2708_pwm *pwm;
 	dev_info(pwm_cdev->pwm->dev, "cdev opened\n");
+
+	pwm = pwm_cdev->pwm;
+	mutex_lock(&pwm->mutex);
+	pwm->blocking_io = 1; /* TODO: make configurable from userspace */
+	mutex_unlock(&pwm->mutex);
+
 	return 0;
 }
 
