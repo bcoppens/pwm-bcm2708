@@ -13,11 +13,13 @@
 #include <linux/mutex.h>
 #include <linux/stat.h>
 #include <linux/string.h>
+#include <linux/wait.h>
 
 #include <mach/dma.h>
 #include <mach/gpio.h>
 #include <mach/platform.h>
 
+#include <asm/atomic.h>
 #include <asm/uaccess.h>
 
 #include <asm-generic/gpio.h>
@@ -50,6 +52,8 @@ struct ws2812_color {
 	uint8_t blue;
 };
 
+/* TODO: look at the semaphore/mutex, and the atomic. It needs a thorough review! */
+
 /* For now, we always allocate a DMA of PAGE_SIZE. TODO: improve this,
  * possibly using scatter/gather (_sg) calls */
 /* TODO: look at if Streaming DMA mappings are useful here,
@@ -76,10 +80,13 @@ struct dma_info {
 
 	int use_interrupt;
 
+	atomic_t busy;
+
 	struct bcm2708_dma_cb *cb;
 };
 
 struct bcm2708_pwm {
+	/* TODO: this should probably be a semaphore now that we access it from interrupt context */
 	struct mutex mutex;
 
 	struct device* dev;
@@ -95,6 +102,7 @@ struct bcm2708_pwm {
 	struct ws2812_color color;
 	struct dma_info dma;
 
+	wait_queue_head_t io_queue;
 	int blocking_io;
 };
 
@@ -481,8 +489,14 @@ static void bcm_dma_irq_ack(void __iomem *dma_chan_base) {
 
 irqreturn_t pwm_dma_interrupt_handler(int irq, void *dev_id) {
 	/* TODO: should we use dev_id to pass along the dma struct? */
-	/* TODO locking...*/
 	bcm_dma_irq_ack(global->dma.base);
+
+	/* The idea here is that only the interrupt context can re-set
+	 * this atomic to 0; all increases happen from a mutexed context,
+	 * and this dec can only be from a matching inc from such a context,
+	 * so it *should* be safe... */
+	atomic_dec(&(global->dma.busy));
+	wake_up_interruptible(&global->io_queue);
 
 	return IRQ_HANDLED;
 }
@@ -537,6 +551,8 @@ static int initialize_dma(struct bcm2708_pwm *pwm)
 	dma->usable_size = PAGE_SIZE - dma->start_offset;
 	dma->used_size = 0;
 
+	atomic_set(&dma->busy, 0);
+
 	dma->cb = dma->buf;
 
 	if (dma->irq) {
@@ -554,6 +570,10 @@ static int initialize_dma(struct bcm2708_pwm *pwm)
 			dma->irq = 0;
 		}
 	}
+
+	/* In case the state is not clean on module load: reset it */
+	bcm_dma_irq_ack(dma->base);
+	bcm_dma_abort(dma->base);
 
 	ret = 0;
 
@@ -606,6 +626,8 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 
 	if (dma->irq && pwm->blocking_io) {
 		cb->info |= BCM2708_DMA_INT_EN;
+	} else {
+		dev_info(pwm->dev, "Not using interrupts\n");
 	}
 
 	cb->src = buf_io;
@@ -629,6 +651,7 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 
 	pwm_prepare_and_start(pwm, 1 /* DMA */ );
 
+	atomic_inc(&dma->busy);
 	bcm_dma_start(dma->base, cb_io);
 
 	/* TODO: I want to set CTL_PWENABLE1 to 0 again when we are done, and disable the clock! */
@@ -743,10 +766,14 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 	initialize_dma(pwm);
 	dev_info(pwm->dev, "Initialized DMA\n");
 
+	init_waitqueue_head(&pwm->io_queue);
+
 	/* Output initial color */
 	//output_color(pwm);
-	dma_output_color_list(pwm, test_color_list,
-			      ARRAY_SIZE(test_color_list));
+	/* We can't really output this right now, since
+	 * it might trigger an interrupt, which assumes global is set... */
+	//dma_output_color_list(pwm, test_color_list,
+	//		      ARRAY_SIZE(test_color_list));
 
 out:
 	return err;
@@ -845,6 +872,14 @@ ssize_t pwm_cdev_write(struct file *filp, const char __user *buf,
 	if (count > buf_size) {
 		out = -ENOMEM;
 		goto out;
+	}
+
+	while (atomic_read(&dma->busy)) {
+		mutex_unlock(&pwm->mutex);
+		if (wait_event_interruptible(pwm->io_queue,
+					     !atomic_read(&dma->busy)))
+			return -ERESTARTSYS; /* Signal caught */
+		mutex_lock(&pwm->mutex);
 	}
 
 	if (copy_from_user(buf_virt, buf, count)) {
