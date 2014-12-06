@@ -1,5 +1,6 @@
 #include <linux/cdev.h>
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/fs.h>
 #include <linux/gpio/consumer.h>
@@ -735,9 +736,10 @@ static int release_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 /* Character device */
 struct bcm2708_pwm_cdev {
 	struct cdev cdev;
-	struct mutex mutex;
-
+	struct class *class;
 	dev_t dev;
+
+	struct mutex mutex;
 
 	struct bcm2708_pwm *pwm;
 };
@@ -819,10 +821,17 @@ static int init_pwm_cdev(struct bcm2708_pwm *pwm)
 	int err;
 	dev_t dev;
 
+	pwm_cdev_.class = class_create(THIS_MODULE, "bcm2708_pwm");
+	if(IS_ERR(pwm_cdev_.class)) {
+		dev_warn(pwm->dev, "Could not allocate class\n");
+		return -ENOMEM;
+	}
+
+
 	err = alloc_chrdev_region(&dev, 0, 1, "bcm2708_pwm");
 	if (err) {
 		dev_warn(pwm->dev, "Could not allocate chrdev region\n");
-		return err;
+		goto out_class;
 	}
 
 	cdev_init(&pwm_cdev_.cdev, &pwm_cdev_fops);
@@ -834,12 +843,26 @@ static int init_pwm_cdev(struct bcm2708_pwm *pwm)
 		goto out;
 	}
 
+	/* TODO: add more attributes to match on! */
+	if (!device_create(pwm_cdev_.class, NULL, pwm_cdev_.cdev.dev,
+			   NULL, "bcm2708_pwm0")) {
+		dev_warn(pwm->dev, "Could not create class device\n");
+		err = -ENOMEM;
+		goto out_cdev;
+	}
+
 	mutex_init(&pwm_cdev_.mutex);
 	pwm_cdev_.pwm = pwm;
 	pwm_cdev_.dev = dev;
 
 	pwm_cdev = &pwm_cdev_;
 	return 0;
+
+out_cdev:
+	cdev_del(&pwm_cdev_.cdev);
+
+out_class:
+	class_destroy(pwm_cdev_.class);
 
 out:
 	unregister_chrdev_region(dev, 1);
@@ -848,6 +871,8 @@ out:
 
 static void release_pwm_cdev(struct bcm2708_pwm_cdev* pwm_cdev)
 {
+	device_destroy(pwm_cdev->class, pwm_cdev->dev);
+	class_destroy(pwm_cdev->class);
 	cdev_del(&pwm_cdev->cdev);
 	unregister_chrdev_region(pwm_cdev->dev, 1);
 }

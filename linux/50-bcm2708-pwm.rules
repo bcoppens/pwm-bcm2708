@@ -1,0 +1,2 @@
+KERNEL=="bcm2708_pwm0", SUBSYSTEM=="bcm2708_pwm", MODE="660", GROUP="plugdev"
+
