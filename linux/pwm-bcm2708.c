@@ -11,6 +11,7 @@
 #include <linux/platform_device.h>
 #include <linux/platform_data/bcm2708.h>
 #include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <linux/wait.h>
@@ -19,7 +20,6 @@
 #include <mach/gpio.h>
 #include <mach/platform.h>
 
-#include <asm/atomic.h>
 #include <asm/uaccess.h>
 
 #include <asm-generic/gpio.h>
@@ -62,6 +62,8 @@ struct ws2812_color {
  * For now, we put the DMA CB in the beginning of the DMA region...
  */
 struct dma_info {
+	spinlock_t lock;
+
 	int can_dma;
 
 	size_t start_offset;	/* sizeof(struct bcm2708_dma_cb) */
@@ -80,7 +82,7 @@ struct dma_info {
 
 	int use_interrupt;
 
-	atomic_t busy;
+	int busy;
 
 	struct bcm2708_dma_cb *cb;
 };
@@ -483,19 +485,20 @@ static void output_color(struct bcm2708_pwm *pwm)
  * really also be in mach-bcm2708/dma.c/h! (TODO)  */
 #define BCM2708_DMA_INT_CLEAR (1 << 2)
 static void bcm_dma_irq_ack(void __iomem *dma_chan_base) {
-	writel(BCM2708_DMA_INT_CLEAR,
-	       dma_chan_base + BCM2708_DMA_CS);
+	if (readl(dma_chan_base + BCM2708_DMA_CS) & BCM2708_DMA_INT_CLEAR)
+		writel(BCM2708_DMA_INT_CLEAR,
+		       dma_chan_base + BCM2708_DMA_CS);
 }
 
 irqreturn_t pwm_dma_interrupt_handler(int irq, void *dev_id) {
 	/* TODO: should we use dev_id to pass along the dma struct? */
+
+	spin_lock(&(global->dma.lock));
 	bcm_dma_irq_ack(global->dma.base);
 
-	/* The idea here is that only the interrupt context can re-set
-	 * this atomic to 0; all increases happen from a mutexed context,
-	 * and this dec can only be from a matching inc from such a context,
-	 * so it *should* be safe... */
-	atomic_dec(&(global->dma.busy));
+	global->dma.busy = 0;
+	spin_unlock(&(global->dma.lock));
+
 	wake_up_interruptible(&global->io_queue);
 
 	return IRQ_HANDLED;
@@ -551,7 +554,13 @@ static int initialize_dma(struct bcm2708_pwm *pwm)
 	dma->usable_size = PAGE_SIZE - dma->start_offset;
 	dma->used_size = 0;
 
-	atomic_set(&dma->busy, 0);
+	spin_lock_init(&dma->lock);
+
+	/* In case the state is not clean on module load: reset it */
+	bcm_dma_irq_ack(dma->base);
+	bcm_dma_abort(dma->base);
+
+	dma->busy = 0;
 
 	dma->cb = dma->buf;
 
@@ -570,10 +579,6 @@ static int initialize_dma(struct bcm2708_pwm *pwm)
 			dma->irq = 0;
 		}
 	}
-
-	/* In case the state is not clean on module load: reset it */
-	bcm_dma_irq_ack(dma->base);
-	bcm_dma_abort(dma->base);
 
 	ret = 0;
 
@@ -610,6 +615,7 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 	unsigned long cb_io;
 	unsigned long buf_io;
 	struct bcm2708_dma_cb *cb;
+	unsigned long int_flags;
 
 	if (!dma->can_dma) {
 		dev_warn(pwm->dev, "Cannot DMA! Aborting list output\n");
@@ -620,6 +626,9 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 	cb_io = dma->handle;	/* Because the CB is currently at the page start */
 
 	cb = dma->cb;
+
+	spin_lock_irqsave(&dma->lock, int_flags);
+
 	/* write 32 bit words, with no destination address increase, no bursts */
 	cb->info = BCM2708_DMA_WAIT_RESP
 	    | BCM2708_DMA_D_DREQ | BCM2708_DMA_S_INC | BCM2708_DMA_PER_MAP(5);
@@ -643,16 +652,13 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 
 	/* For now, since we use coherent memory, no need to flush CB */
 
-	/* Abort if busy, TODO check return value */
-	if (bcm_dma_is_busy(dma->base)) {
-		dev_info(pwm->dev, "DMA busy, aborting it first\n");
-		bcm_dma_abort(dma->base);
-	}
-
 	pwm_prepare_and_start(pwm, 1 /* DMA */ );
 
-	atomic_inc(&dma->busy);
 	bcm_dma_start(dma->base, cb_io);
+
+	dma->busy = 1;
+
+	spin_unlock_irqrestore(&dma->lock, int_flags);
 
 	/* TODO: I want to set CTL_PWENABLE1 to 0 again when we are done, and disable the clock! */
 }
@@ -857,7 +863,6 @@ ssize_t pwm_cdev_write(struct file *filp, const char __user *buf,
 
 	pwm = pwm_cdev->pwm;
 
-	mutex_lock(&pwm->mutex);
 	dma = &pwm->dma;
 
 	if (!dma->can_dma) {
@@ -874,13 +879,15 @@ ssize_t pwm_cdev_write(struct file *filp, const char __user *buf,
 		goto out;
 	}
 
-	while (atomic_read(&dma->busy)) {
-		mutex_unlock(&pwm->mutex);
+	spin_lock(&dma->lock);
+	while (dma->busy) {
+		spin_unlock(&dma->lock);
 		if (wait_event_interruptible(pwm->io_queue,
-					     !atomic_read(&dma->busy)))
+					     !dma->busy))
 			return -ERESTARTSYS; /* Signal caught */
-		mutex_lock(&pwm->mutex);
+		spin_lock(&dma->lock);
 	}
+	spin_unlock(&dma->lock);
 
 	if (copy_from_user(buf_virt, buf, count)) {
 		out = -EFAULT;
@@ -892,7 +899,6 @@ ssize_t pwm_cdev_write(struct file *filp, const char __user *buf,
 	/* Don't update offp for now */
 
 out:
-	mutex_unlock(&pwm->mutex);
 	return out;
 }
 
