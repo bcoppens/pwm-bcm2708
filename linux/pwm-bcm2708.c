@@ -430,14 +430,28 @@ out:
 	return count;
 }
 
+static ssize_t pwm_show_current_freq(struct device_driver *driver, char *buf)
+{
+	/* TODO: container_of to get the pdev, it's associated data, and through it, the pwm */
+
+	if (!global) {
+		return snprintf(buf, PAGE_SIZE, "%s", "ERROR\n");
+	}
+
+	return snprintf(buf, PAGE_SIZE, "%i\n", global->clock.current_freq);
+}
+
 static DRIVER_ATTR(pwm_led0_color, S_IRUGO | S_IWUSR, pwm_show_led0_color,
 		   pwm_store_led0_color);
 static DRIVER_ATTR(pwm_led0_color_string, S_IWUSR, NULL,
 		   pwm_store_led0_color_string);
+static DRIVER_ATTR(pwm_current_freq, S_IRUGO, pwm_show_current_freq,
+		   NULL);
 
 static struct attribute *pwm_dev_attrs[] = {
 	&driver_attr_pwm_led0_color.attr,
 	&driver_attr_pwm_led0_color_string.attr,
+	&driver_attr_pwm_current_freq.attr,
 	NULL,
 };
 
