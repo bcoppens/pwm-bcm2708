@@ -109,6 +109,23 @@ struct bcm2708_pwm {
 	int blocking_io;
 };
 
+#if 0
+static void debug_state(struct bcm2708_pwm *pwm) {
+	static int dbg = 0;
+	dbg++;
+	if (dbg > 3)
+		return;
+	dev_info(pwm->dev, "Clock div: %x\n", readl(pwm->clock.div));
+	dev_info(pwm->dev, "Clock ctl: %x\n", readl(pwm->clock.ctl));
+	dev_info(pwm->dev, "PWM dmac: %x\n", readl(pwm->base + 0x8));
+	dev_info(pwm->dev, "PWM ctl: %x\n", readl(pwm->base));
+	dev_info(pwm->dev, "PWM sta: %x\n", readl(pwm->base + 0x4));
+	dev_info(pwm->dev, "DMA ctl: %x\n", readl(pwm->dma.base));
+	dev_info(pwm->dev, "DMA ti: %x\n", readl(pwm->dma.base + 0x8));
+	dev_info(pwm->dev, "DMA debug: %x\n", readl(pwm->dma.base + 0x20));
+}
+#endif
+
 /* TODO */
 struct bcm2708_pwm global_;
 struct bcm2708_pwm *global = NULL;
@@ -251,20 +268,31 @@ ATTRIBUTE_GROUPS(pwm_dev);
  * Optionally it enables the PWM's DMA configuration.
  * Then it enables PWM.
  */
+#define BCM2708_PWM_STA_WERR_CLEAR (1<<2)
+#define BCM2708_PWM_STA_RERR_CLEAR (1<<3)
+#define BCM2708_PWM_STA_BERR_CLEAR (1<<8)
 static void pwm_prepare_and_start(struct bcm2708_pwm *pwm, int start_dma)
 {
 	pwm_clock_enable(pwm);
 	dev_dbg(pwm->dev, "Configured clock!\n");
 
-	/* Clear PWM STA bus error bit */
-	writel(0x100, pwm->base + 0x4);
+	/* Some udelays here, inspired by Garff's code, because it *does*
+	 * seem to lock up sometimes ... */
+
+	/* Clear STA error bits */
+	writel(  BCM2708_PWM_STA_WERR_CLEAR
+	       | BCM2708_PWM_STA_RERR_CLEAR
+	       | BCM2708_PWM_STA_BERR_CLEAR, pwm->base + 0x4);
+	udelay(60);
 
 	/* Clear fifo */
 	set_pwm_ctl(pwm, CTL_CLRFIFO);
 	writel(32, pwm->base + 0x10);
+	udelay(60);
 
 	if (start_dma) {
 		pwm_enable_dma(pwm);
+		udelay(60);
 	}
 
 	set_pwm_ctl(pwm, CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
@@ -276,9 +304,10 @@ static void pwm_prepare_and_start(struct bcm2708_pwm *pwm, int start_dma)
 /* Manually acknowledge the IRQ to the DMA controller. This code should
  * really also be in mach-bcm2708/dma.c/h! (TODO)  */
 #define BCM2708_DMA_INT_CLEAR (1 << 2)
+#define BCM2708_DMA_END_CLEAR (1 << 1)
 static void bcm_dma_irq_ack(void __iomem *dma_chan_base) {
 	if (readl(dma_chan_base + BCM2708_DMA_CS) & BCM2708_DMA_INT_CLEAR)
-		writel(BCM2708_DMA_INT_CLEAR,
+		writel(BCM2708_DMA_INT_CLEAR | BCM2708_DMA_END_CLEAR,
 		       dma_chan_base + BCM2708_DMA_CS);
 }
 
@@ -536,8 +565,6 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 
 	init_waitqueue_head(&pwm->io_queue);
 
-	//dma_output_color_list(pwm, test_color_list,
-	//		      ARRAY_SIZE(test_color_list));
 out:
 	return err;
 
