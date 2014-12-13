@@ -323,112 +323,9 @@ static struct ws2812_color test_color_list[] = {
 };
 
 /* sysfs code */
-static ssize_t pwm_show_led0_color(struct device_driver *driver, char *buf)
-{
-	/* TODO: container_of to get the pdev, it's associated data, and through it, the pwm */
-	struct ws2812_color color;
-
-	if (!global) {
-		return snprintf(buf, PAGE_SIZE, "%s", "ERROR\n");
-	}
-
-	mutex_lock(&global->mutex);	/* TODO: interruptible? */
-	color = global->color;
-	mutex_unlock(&global->mutex);
-
-	return snprintf(buf, PAGE_SIZE, "%i %i %i\n", color.red, color.green,
-			color.blue);
-}
-
 static void output_color(struct bcm2708_pwm *pwm);
 static void dma_output_color_list(struct bcm2708_pwm *pwm,
 				  struct ws2812_color *list, size_t nens);
-
-/* TODO: check that pos < count! */
-static ssize_t pwm_store_led0_color(struct device_driver *driver,
-				    const char *buf, size_t count)
-{
-	struct ws2812_color color;
-
-	if (!global) {
-		printk(KERN_WARNING "bcm2708_pwm: "
-		       "Trying to set led color, but no PWM device!\n");
-		return -ENOMEM;
-	}
-
-	if (!buf) {
-		printk(KERN_WARNING "bcm2708_pwm: NULL buffer in store!");
-		return -ENOMEM;
-	}
-
-	if (sscanf(buf, "%hhu %hhu %hhu",
-		   &color.red, &color.green, &color.blue) != 3) {
-		printk(KERN_WARNING "bcm2708_pwm: "
-		       "Failed to parse '%s' as an RGB triplet\n",
-		       buf);
-		count = -ENOMEM;	/* TODO: find a better error code */
-		goto out;
-	}
-
-	printk(KERN_INFO "bcm2708_pwm: Setting LED color to %i %i %i\n",
-	       color.red, color.green, color.blue);
-
-	mutex_lock(&global->mutex);
-	global->color = color;
-	output_color(global);
-
-out:
-	mutex_unlock(&global->mutex);
-	return count;
-}
-
-/* TODO: perhaps dynamically alloc memory? */
-/* 16 elements matching my NeoPixel ring for now */
-/* TODO a PAGE_SIZE of RGB triplets ought to suffice for most purposes, but otherwise
- * I will need to make a character device... find this out */
-/* Format: R,G,B[ R,G,B]* */
-static struct ws2812_color sysfs_color_list[16];
-static ssize_t pwm_store_led0_color_string(struct device_driver *driver,
-					   const char *buf, size_t count)
-{
-	struct ws2812_color color;
-	int elements_read = 0;
-
-	if (!global) {
-		printk(KERN_WARNING
-		       "Trying to set led color, but no PWM device!\n");
-		return -ENOMEM;
-	}
-
-	if (!buf) {
-		printk(KERN_WARNING "NULL buffer in store!");
-		return -ENOMEM;
-	}
-
-	while (elements_read < ARRAY_SIZE(sysfs_color_list)) {
-		if (sscanf
-		    (buf, "%hhu,%hhu,%hhu", &color.red, &color.green,
-		     &color.blue) != 3)
-			break;
-
-		sysfs_color_list[elements_read++] = color;
-		// printk(KERN_ALERT "Read LED color as %i %i %i\n", color.red, color.green, color.blue);
-
-		buf = strchr(buf, ' ');
-		if (!buf)
-			break;
-		buf++;		/* skip the space */
-	}
-
-	printk(KERN_INFO "bcm2708_pwm: Setting %i new colors\n", elements_read);
-
-	mutex_lock(&global->mutex);
-	dma_output_color_list(global, sysfs_color_list, elements_read);
-
-out:
-	mutex_unlock(&global->mutex);
-	return count;
-}
 
 static ssize_t pwm_show_current_freq(struct device_driver *driver, char *buf)
 {
@@ -441,16 +338,10 @@ static ssize_t pwm_show_current_freq(struct device_driver *driver, char *buf)
 	return snprintf(buf, PAGE_SIZE, "%i\n", global->clock.current_freq);
 }
 
-static DRIVER_ATTR(pwm_led0_color, S_IRUGO | S_IWUSR, pwm_show_led0_color,
-		   pwm_store_led0_color);
-static DRIVER_ATTR(pwm_led0_color_string, S_IWUSR, NULL,
-		   pwm_store_led0_color_string);
 static DRIVER_ATTR(pwm_current_freq, S_IRUGO, pwm_show_current_freq,
 		   NULL);
 
 static struct attribute *pwm_dev_attrs[] = {
-	&driver_attr_pwm_led0_color.attr,
-	&driver_attr_pwm_led0_color_string.attr,
 	&driver_attr_pwm_current_freq.attr,
 	NULL,
 };
