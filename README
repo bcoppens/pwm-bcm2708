@@ -9,7 +9,10 @@ Tested on my Raspberry Pi B+ with an Adafruit NeoPixel Ring with 16 WS2812 LEDs.
 Directory structure:
 * linux/ Linux kernel module, and the required (small) kernel patch for kernel 3.16.5
 * lib/ Code to access the kernel module's character device
-* apps/ Test example using the code in lib/ to drive a NeoPixel ring
+* apps/ Test example using the code in lib/ to drive a NeoPixel ring:
+  - ws2812_bcm2708_demo: a very simple demo that does some animations with color transitions
+  - clock: a simple clock app
+  - stress: a stress test for the irq
 
 Build instructions:
 * Build a patched 3.16.5 kernel
