@@ -28,6 +28,8 @@ struct ws28128_bcm2708 {
   size_t size;
 };
 
+struct pwm_bwm2708_dev;
+void ws28128_bcm2708_init(struct pwm_bwm2708_dev* dev); /* Sets the correct oscillator frequency */
 void ws28128_bcm2708_render(struct ws2812_array* array, struct ws28128_bcm2708* out);
 
 #ifdef __cplusplus

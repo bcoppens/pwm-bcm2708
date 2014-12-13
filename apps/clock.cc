@@ -134,6 +134,8 @@ int main(int argc, char** argv) {
   clean_colors.count = 16;
 
   struct pwm_bwm2708_dev* pwm = pwm_bwm2708_create(argv[1]);
+  ws28128_bcm2708_init(pwm);
+
   struct ws28128_bcm2708 out = { .buffer = NULL };
   struct ws2812_array colors = clean_colors;
 

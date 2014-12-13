@@ -3,6 +3,16 @@
 
 #include "ws2812_bcm2708.h"
 
+/* The WS2812 data transfer time is ~1.25µs +/- 600ns (one bit transfer), i.e., 800kHz 
+ * One WS2812 bit equals 3 PWM-sent bits, thus, we need to clock at 2.4MHz */
+#define CLOCK_FREQ (3*800000)
+
+void ws28128_bcm2708_init(struct pwm_bwm2708_dev* dev) {
+  if (pwm_bwm2708_set_frequency(dev, CLOCK_FREQ) != 0)
+    printf("Failed to set frequency!\n");
+}
+
+
 /* TODO: this is a straightforward copy from my kernel debugging code, make cleaner */
 
 /* Serializes o send '1', send 110; to send '0', send '100' */

@@ -22,6 +22,13 @@ int main(int argc, char** argv) {
   printf("Initial LED setup\n");
 
   struct pwm_bwm2708_dev* pwm = pwm_bwm2708_create(argv[1]);
+
+  printf("Initial frequency is: %i\n", pwm_bwm2708_get_frequency(pwm));
+
+  ws28128_bcm2708_init(pwm);
+
+  printf("Frequency after WS2812 setup is: %i\n", pwm_bwm2708_get_frequency(pwm));
+
   struct ws28128_bcm2708 out = { .buffer = NULL };
   struct ws2812_array colors = clean_colors;
   struct timespec timer;

@@ -5,6 +5,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
+#include <linux/ioctl.h>
+
+
 #include "pwm_bcm2708.h"
 
 struct pwm_bwm2708_dev {
@@ -40,3 +43,20 @@ int pwm_bwm2708_write_data(struct pwm_bwm2708_dev* dev, void* data, size_t len) 
 
   return 0;
 }
+
+/* TODO: these should be in a header shared with kernelpace? */
+#define PWM_BCM2708_IOCTL_MAGIC 0xB4
+#define PWM_BCM2708_IOCTL_GET_FREQUENCY \
+	_IO(PWM_BCM2708_IOCTL_MAGIC, 0)
+#define PWM_BCM2708_IOCTL_SET_FREQUENCY \
+	_IOW(PWM_BCM2708_IOCTL_MAGIC, 1, uint32_t)
+
+
+int pwm_bwm2708_get_frequency(struct pwm_bwm2708_dev* dev) {
+  return ioctl(dev->fd, PWM_BCM2708_IOCTL_GET_FREQUENCY);
+}
+
+int pwm_bwm2708_set_frequency(struct pwm_bwm2708_dev* dev, uint32_t freq) {
+  return ioctl(dev->fd, PWM_BCM2708_IOCTL_SET_FREQUENCY, freq);
+}
+

@@ -6,6 +6,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/ioctl.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -33,6 +34,14 @@
 #define GPIO_PIN 18
 #define ALT_FUN GPIO_FSEL_ALT5
 #define PWM_CHANNEL 0
+
+/* TODO: these should be in a header shared with userspace? */
+#define PWM_BCM2708_IOCTL_MAGIC 0xB4
+#define PWM_BCM2708_IOCTL_GET_FREQUENCY \
+	_IO(PWM_BCM2708_IOCTL_MAGIC, 0)
+#define PWM_BCM2708_IOCTL_SET_FREQUENCY \
+	_IOW(PWM_BCM2708_IOCTL_MAGIC, 1, uint32_t)
+#define PWM_BCM2708_IOCTL_MAX 1
 
 /* TODO: check whether or not we can/should use clk_get(&pdev->dev, clock_name) */
 struct clock {
@@ -125,6 +134,14 @@ static void pwm_clock_set_div(struct bcm2708_pwm *pwm,
 	if (pwm->clock.current_freq == target_frequency)
 		return;
 
+	if (target_frequency == 0) {
+		pwm->clock.current_freq = 0;
+		/* Since this shouldn't be called/reached when clock is busy,
+		 * and the clock won't be re-enabled with freq = 0, we don't
+		 * need to do anything else */
+		return;
+	}
+
 	/* Use integer divider on the 19.2MHz oscillator, no MASH */
 	divider = OSCILLATOR_FREQUENCY / target_frequency;
 	div = CM_PASSWD | (divider << 12);
@@ -139,6 +156,11 @@ static void pwm_clock_enable(struct bcm2708_pwm *pwm)
 {
 	if (pwm->clock.enabled)
 		return;
+
+	if (pwm->clock.current_freq == 0) {
+		dev_info(pwm->dev, "Won't enable a clock with freq=0...\n");
+		return;
+	}
 
 	writel(CM_PASSWD | CM_CTL_CLOCK_OSC, pwm->clock.ctl);
 	dev_dbg(pwm->dev, "Set the oscillator...\n");
@@ -719,6 +741,8 @@ out_free_gpio:
 
 static int release_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 {
+	pwm_clock_disable(pwm);
+
 	dev_info(pwm->dev, "Releasing DMA...\n");
 	release_dma(pdev, pwm);
 
@@ -809,8 +833,37 @@ out:
 	return out;
 }
 
+long pwm_cdev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+	struct bcm2708_pwm *pwm;
+	long ret = 0;
+
+	pwm = pwm_cdev->pwm;
+
+	if (_IOC_TYPE(cmd) != PWM_BCM2708_IOCTL_MAGIC)
+		return -ENOTTY;
+	if (_IOC_NR(cmd) > PWM_BCM2708_IOCTL_MAX)
+		return -ENOTTY;
+
+	switch(cmd) {
+	case PWM_BCM2708_IOCTL_GET_FREQUENCY:
+		return pwm->clock.current_freq;
+
+	case PWM_BCM2708_IOCTL_SET_FREQUENCY:
+		mutex_lock(&pwm->mutex);
+		/* TODO: should fail when clock is busy! */
+		pwm_clock_set_div(pwm, (uint32_t)arg);
+		mutex_unlock(&pwm->mutex);
+		break;
+	default:
+		return -ENOTTY;
+	}
+
+	return ret;
+}
+
 static struct file_operations pwm_cdev_fops = {
 	.owner	= THIS_MODULE,
+	.unlocked_ioctl	= pwm_cdev_ioctl,
 	.open	= pwm_cdev_open,
 	.release= pwm_cdev_release,
 	.write	= pwm_cdev_write
