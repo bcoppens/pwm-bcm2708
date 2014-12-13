@@ -52,13 +52,6 @@ struct clock {
 	int enabled;
 };
 
-/* Serialize single color, as GREEN RED BLUE */
-struct ws2812_color {
-	uint8_t red;
-	uint8_t green;
-	uint8_t blue;
-};
-
 /* For now, we always allocate a DMA of PAGE_SIZE. TODO: improve this,
  * possibly using scatter/gather (_sg) calls */
 /* TODO: look at if Streaming DMA mappings are useful here,
@@ -97,8 +90,6 @@ struct bcm2708_pwm {
 
 	struct clock clock;	/* PWM-clock, so it's OK we manage this ourselves */
 
-	/* To test */
-	struct ws2812_color color;
 	struct dma_info dma;
 };
 
@@ -204,12 +195,6 @@ static void set_pwm_ctl(struct bcm2708_pwm *pwm, int flags)
 	writel(flags, pwm->base);
 }
 
-/* For now to test: no dma */
-static void write_data(struct bcm2708_pwm *pwm, uint32_t data)
-{
-	writel(data, pwm_fifo(pwm));
-}
-
 #define PWM_DMAC_ENAB     (1<<31)
 #define PWM_DMAC_PANIC(n) (n<<8)
 #define PWM_DMAC_DREQ(n)  (n)
@@ -224,109 +209,7 @@ static void pwm_disable_dma(struct bcm2708_pwm *pwm)
 	writel(0, pwm_dmac(pwm));
 }
 
-/* Test code */
-
-/* To send '1', send 110; to send '0', send '100' */
-#define OUTPUT_BIT(bit, write_command) \
-  current_data |= (bit) << bit_shift; \
-  bit_shift--; \
-  if (bit_shift < 0) { /* flush word */ \
-    write_command ; \
-    bit_shift = 31; \
-    current_data = 0; \
-  }
-
-#define OUTPUT_COLOR_LOOP(value, write_command) \
-    for (i = 7; i >= 0; i--) { \
-      OUTPUT_BIT(1, write_command); \
-      OUTPUT_BIT( ((value) >> i) & 1, write_command ); \
-      OUTPUT_BIT(0, write_command); \
-    }
-
-static void output_single_color(struct bcm2708_pwm *pwm,
-				struct ws2812_color color)
-{
-	int bit_shift = 31;
-	uint32_t current_data = 0;
-	int i;
-
-	OUTPUT_COLOR_LOOP(color.green, write_data(pwm, current_data))
-	    OUTPUT_COLOR_LOOP(color.red, write_data(pwm, current_data))
-	    OUTPUT_COLOR_LOOP(color.blue, write_data(pwm, current_data))
-
-	    /* Flush remaining */
-	    write_data(pwm, current_data);
-
-	/* Silence bit is 0 -> reset command for the WS2812 */
-	write_data(pwm, 0);
-	udelay(100);
-}
-
-static size_t write_ws2812_list_to_buffer(struct ws2812_color *list,
-					  size_t nens,
-					  uint32_t * buffer, size_t buffer_size)
-{
-	int bit_shift = 31;
-	uint32_t current_data = 0;
-	int i;
-	size_t buf_pos = 0;
-	size_t list_pos = 0;
-
-#define TO_BUFFER \
-  do { \
-    buffer[buf_pos++] = current_data; \
-    if(buf_pos >= buffer_size) goto done; \
-  } while(0)
-
-	for (list_pos = 0; list_pos < nens; list_pos++) {
-		OUTPUT_COLOR_LOOP(list[list_pos].green, TO_BUFFER)
-		    OUTPUT_COLOR_LOOP(list[list_pos].red, TO_BUFFER)
-		    OUTPUT_COLOR_LOOP(list[list_pos].blue, TO_BUFFER)
-	}
-
-	/* Flush remaining */
-	TO_BUFFER;
-
-	/* Silence */
-	current_data = 0;
-	TO_BUFFER;
-
-done:
-	if (buf_pos >= buffer_size)
-		printk(KERN_ALERT "Buffer was full!\n");
-
-	return buf_pos;		/* Number of elements to be transfered with DMA */
-}
-
-#undef TO_BUFFER
-
-#undef OUTPUT_COLOR_LOOP
-#undef OUTPUT_BIT
-
-static struct ws2812_color test_color_list_[] = {
-	{125,	0,	0},
-	{0,	125,	0},
-	{0,	0,	125},
-	{125,	125,	0},
-	{0,	125,	125},
-	{125,	125,	125}
-};
-
-/* To quickly clear the LEDs */
-static struct ws2812_color test_color_list[] = {
-	{0, 0, 0},
-	{0, 0, 0},
-	{0, 0, 0},
-	{0, 0, 0},
-	{0, 0, 0},
-	{0, 0, 0}
-};
-
 /* sysfs code */
-static void output_color(struct bcm2708_pwm *pwm);
-static void dma_output_color_list(struct bcm2708_pwm *pwm,
-				  struct ws2812_color *list, size_t nens);
-
 static ssize_t pwm_show_current_freq(struct device_driver *driver, char *buf)
 {
 	/* TODO: container_of to get the pdev, it's associated data, and through it, the pwm */
@@ -370,25 +253,6 @@ static void pwm_prepare_and_start(struct bcm2708_pwm *pwm, int start_dma)
 
 	set_pwm_ctl(pwm, CTL_MODE1_SERIALIZE | CTL_USEFIFO1 | CTL_PWENABLE1);
 	/* TODO: verify status? */
-}
-
-static void output_color(struct bcm2708_pwm *pwm)
-{
-	/* TODO: we should automatically disable it after DMA is done, use IRQ? */
-	pwm_disable_dma(pwm);
-
-	pwm_prepare_and_start(pwm, 0 /* no DMA */ );
-
-	dev_dbg(pwm->dev, "Outputting single color %hhu %hhu %hhu\n",
-	       pwm->color.red, pwm->color.green, pwm->color.blue);
-
-	output_single_color(pwm, pwm->color);
-
-	set_pwm_ctl(pwm, 0);
-
-	dev_info(pwm->dev, "Disabling clock again\n");
-	pwm_clock_disable(pwm);
-	dev_info(pwm->dev, "Disabled clock\n");
 }
 
 /* DMA-related code */
@@ -515,47 +379,17 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 	/* TODO: I want to set CTL_PWENABLE1 to 0 again when we are done, and disable the clock! */
 }
 
-static void dma_output_color_list(struct bcm2708_pwm *pwm,
-				  struct ws2812_color *list, size_t nens)
-{
-	struct dma_info *dma = &pwm->dma;
-	size_t buf_size;
-	uint32_t *buf_virt;
-	size_t len;
-
-	if (!dma->can_dma) {
-		dev_warn(pwm->dev, "Cannot DMA! Aborting list output\n");
-		return;
-	}
-
-	/* We write uint32_t's, but the actual size for DMA is in bytes */
-	buf_size = dma->usable_size / sizeof(uint32_t);
-	buf_virt = (uint32_t *) (dma->buf + dma->start_offset);
-
-	len = write_ws2812_list_to_buffer(list, nens, buf_virt, buf_size);
-
-	pwm_dma_output(pwm, len * sizeof(uint32_t));
-}
-
 static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 {
 	int err = 0;
 	int gpio = GPIO_PIN;
 	struct gpio_chip *gc;
-	struct ws2812_color color;
 
 	struct resource *regs_pwm;
 	struct resource *regs_cm_pwm;
 
 	mutex_init(&pwm->mutex);
 
-	/* Light purple, rather than a bright primary color: less chance of
-	 * it showing up on the display by accident rather than on purpose */
-	color.red = 125;
-	color.green = 0;
-	color.blue = 125;
-	pwm->color = color;
-	
 	pwm->dev = &pdev->dev;
 
 	regs_pwm =
@@ -623,11 +457,6 @@ static int setup_device(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 	dev_info(pwm->dev, "Initializing DMA...\n");
 	initialize_dma(pwm);
 	dev_info(pwm->dev, "Initialized DMA\n");
-
-	/* Output initial color */
-	//output_color(pwm);
-	dma_output_color_list(pwm, test_color_list,
-			      ARRAY_SIZE(test_color_list));
 
 out:
 	return err;
