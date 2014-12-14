@@ -493,7 +493,7 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 
 	spin_lock_irqsave(&dma->lock, int_flags);
 
-	region = &dma->regions[dma->current_buffer_index];
+	region = dma_target_buffer(dma);
 
 	buf_io = region->handle + region->start_offset;
 	cb_io = region->handle;	/* Because the CB is currently at the page start */
