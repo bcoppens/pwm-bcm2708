@@ -10,6 +10,7 @@
 #include <linux/ioctl.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/bcm2708.h>
 #include <linux/mutex.h>
@@ -64,11 +65,7 @@ struct clock {
  *
  * For now, we put the DMA CB in the beginning of the DMA region...
  */
-struct dma_info {
-	spinlock_t lock;
-
-	int can_dma;
-
+struct dma_region {
 	size_t start_offset;	/* sizeof(struct bcm2708_dma_cb) */
 
 	size_t allocated_size;
@@ -78,6 +75,19 @@ struct dma_info {
 	void *buf;
 	dma_addr_t handle;	/* IO address of buf */
 
+	struct bcm2708_dma_cb *cb;
+};
+
+struct dma_info {
+	spinlock_t lock;
+
+	int can_dma;
+
+	/* possibly 2 regions for double buffering */
+	struct dma_region regions[2];
+	int use_double_buffering;
+	int current_buffer_index;
+
 	int chan;
 	int irq;		// TODO don't we need to explicitly acquire it?
 
@@ -86,8 +96,6 @@ struct dma_info {
 	int use_interrupt;
 
 	int busy;
-
-	struct bcm2708_dma_cb *cb;
 };
 
 struct bcm2708_pwm {
@@ -301,6 +309,18 @@ static void pwm_prepare_and_start(struct bcm2708_pwm *pwm, int start_dma)
 
 /* DMA-related code */
 
+static int use_double_buffering = 0; /* doesn't yet work completely */
+module_param(use_double_buffering, int, 0);
+
+
+/* Returns a pointer to the dma region into which we need to write for the
+ * next dma transfer */
+static struct dma_region *dma_target_buffer(struct dma_info *dma) {
+	if (!dma->use_double_buffering)
+		return &dma->regions[0];
+	return &dma->regions[1 - dma->current_buffer_index];
+}
+
 /* Manually acknowledge the IRQ to the DMA controller. This code should
  * really also be in mach-bcm2708/dma.c/h! (TODO)  */
 #define BCM2708_DMA_INT_CLEAR (1 << 2)
@@ -333,6 +353,8 @@ static int initialize_dma(struct bcm2708_pwm *pwm)
 	int acquired_chans[5];
 	int acquired_chans_count = 0;
 	int i;
+	int allocate_buffers;
+	int allocated_buffers = 0;
 	struct device *dev = pwm->dev;
 
 	struct dma_info *dma = &pwm->dma;
@@ -362,18 +384,34 @@ static int initialize_dma(struct bcm2708_pwm *pwm)
 
 	} while (1);
 
-	dma->buf =
-	    dma_alloc_coherent(dev, PAGE_SIZE, &(dma->handle), 0 /*flags */ );
-	if (!dma->buf) {
-		dev_warn(dev, "Failed to allocate coherent DMA buffer!\n");
-		goto release_channels;
+	dev_info(dev, "Using double buffering: %i\n", use_double_buffering);
+	dma->use_double_buffering = use_double_buffering;
+	if (dma->use_double_buffering)
+		allocate_buffers = 2;
+	else
+		allocate_buffers = 1;
+
+	for (i = 0; i < allocate_buffers; i++) {
+		struct dma_region *region = &dma->regions[i];
+
+		region->buf =
+			dma_alloc_coherent(dev, PAGE_SIZE, &(region->handle), 0);
+		if (!region->buf) {
+			dev_warn(dev, "Failed to allocate coherent DMA buffer!\n");
+			goto release_channels;
+		}
+
+		region->allocated_size = PAGE_SIZE;
+		region->start_offset = sizeof(struct bcm2708_dma_cb);
+		region->usable_size = PAGE_SIZE - region->start_offset;
+		region->used_size = 0;
+		region->cb = region->buf;
+
+		allocated_buffers++;
 	}
 
 	dma->can_dma = 1;
-	dma->allocated_size = PAGE_SIZE;
-	dma->start_offset = sizeof(struct bcm2708_dma_cb);
-	dma->usable_size = PAGE_SIZE - dma->start_offset;
-	dma->used_size = 0;
+	dma->current_buffer_index = 0;
 
 	spin_lock_init(&dma->lock);
 
@@ -382,8 +420,6 @@ static int initialize_dma(struct bcm2708_pwm *pwm)
 	bcm_dma_abort(dma->base);
 
 	dma->busy = 0;
-
-	dma->cb = dma->buf;
 
 	if (dma->irq) {
 		/* TODO: fast irq? TODO I'm assuming: not shared? */
@@ -404,6 +440,12 @@ static int initialize_dma(struct bcm2708_pwm *pwm)
 	ret = 0;
 
 release_channels:
+	for (i = 0; i < allocated_buffers; i++) {
+		struct dma_region *region = &dma->regions[i];
+		dma_free_coherent(dev, region->allocated_size, region->buf,
+			  region->handle);
+	}
+
 	if (!dma->can_dma && dma->chan > 0)
 		bcm_dma_chan_free(dma->chan);
 
@@ -416,6 +458,7 @@ release_channels:
 static void release_dma(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 {
 	struct dma_info *dma = &pwm->dma;
+	int i;
 
 	if (!dma->can_dma)
 		return;
@@ -426,8 +469,12 @@ static void release_dma(struct platform_device *pdev, struct bcm2708_pwm *pwm)
 	bcm_dma_abort(dma->base);	/* TODO return value */
 
 	bcm_dma_chan_free(dma->chan);
-	dma_free_coherent(&pdev->dev, dma->allocated_size, dma->buf,
-			  dma->handle);
+
+	for (i = 0; i < 1 + dma->use_double_buffering; i++) {
+		struct dma_region *region = &dma->regions[i];
+		dma_free_coherent(&pdev->dev, region->allocated_size,
+				  region->buf, region->handle);
+	}
 }
 
 /* This assumes the data is already in the pwm->dma buffer */
@@ -437,18 +484,21 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 	unsigned long buf_io;
 	struct bcm2708_dma_cb *cb;
 	unsigned long int_flags;
+	struct dma_region *region;
 
 	if (!dma->can_dma) {
 		dev_warn(pwm->dev, "Cannot DMA! Aborting list output\n");
 		return;
 	}
 
-	buf_io = dma->handle + dma->start_offset;
-	cb_io = dma->handle;	/* Because the CB is currently at the page start */
-
-	cb = dma->cb;
-
 	spin_lock_irqsave(&dma->lock, int_flags);
+
+	region = &dma->regions[dma->current_buffer_index];
+
+	buf_io = region->handle + region->start_offset;
+	cb_io = region->handle;	/* Because the CB is currently at the page start */
+
+	cb = region->cb;
 
 	/* write 32 bit words, with no destination address increase, no bursts */
 	cb->info = BCM2708_DMA_WAIT_RESP
@@ -478,6 +528,9 @@ static void pwm_dma_output(struct bcm2708_pwm *pwm, size_t len /* in bytes */) {
 	bcm_dma_start(dma->base, cb_io);
 
 	dma->busy = 1;
+
+	if (dma->use_double_buffering)
+		dma->current_buffer_index = 1 - dma->current_buffer_index;
 
 	spin_unlock_irqrestore(&dma->lock, int_flags);
 
@@ -639,6 +692,7 @@ ssize_t pwm_cdev_write(struct file *filp, const char __user *buf,
 {
 	struct dma_info *dma;
 	struct bcm2708_pwm *pwm;
+	struct dma_region *target_region;
 	size_t buf_size;
 	uint32_t *buf_virt;
 	size_t out = count;
@@ -658,12 +712,22 @@ ssize_t pwm_cdev_write(struct file *filp, const char __user *buf,
 		goto out;
 	}
 
-	buf_size = dma->usable_size;
-	buf_virt = dma->buf + dma->start_offset;
+	target_region = dma_target_buffer(dma);
+	buf_size = target_region->usable_size;
+	buf_virt = target_region->buf + target_region->start_offset;
 
 	if (count > buf_size) {
 		out = -ENOMEM;
 		goto out;
+	}
+
+	/* If we use double buffering, the next buffer can be overwritten
+	   before the previous transfer has finished. */
+	if (dma->use_double_buffering) {
+		if (copy_from_user(buf_virt, buf, count)) {
+			out = -EFAULT;
+			goto out;
+		}
 	}
 
 	spin_lock(&dma->lock);
@@ -676,9 +740,13 @@ ssize_t pwm_cdev_write(struct file *filp, const char __user *buf,
 	}
 	spin_unlock(&dma->lock);
 
-	if (copy_from_user(buf_virt, buf, count)) {
-		out = -EFAULT;
-		goto out;
+	/* No double buffering => we can only overwrite the region
+	 * when any previous transfer has finished */
+	if (!dma->use_double_buffering) {
+		if (copy_from_user(buf_virt, buf, count)) {
+			out = -EFAULT;
+			goto out;
+		}
 	}
 
 	pwm_dma_output(pwm, count);
